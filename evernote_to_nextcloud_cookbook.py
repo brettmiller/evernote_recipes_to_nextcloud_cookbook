@@ -509,6 +509,22 @@ class EvernoteToNextcloudConverter:
         in_ingredients_section = False
         
         for line in lines:
+            # Skip URLs completely
+            if any(url_part in line.lower() for url_part in ['http', 'www.', '.com', '.org']):
+                continue
+                
+            # Skip page numbers and references
+            if re.search(r'\bpage\s+\d+\b|\bp\.\s*\d+\b', line.lower()):
+                continue
+                
+            # Skip serving/yield info
+            if re.search(r'\b(serves?|servings?|yield|makes?)\s+\d+\b', line.lower()):
+                continue
+                
+            # Skip time information
+            if re.search(r'\b(prep|cook|total)\s+time\b|\b\d+\s+(min|minutes|hrs?|hours?)\b', line.lower()):
+                continue
+            
             # Check for ingredient section headers
             if re.search(r'\b(ingredient|材料)\b', line.lower()):
                 in_ingredients_section = True
@@ -529,14 +545,33 @@ class EvernoteToNextcloudConverter:
         # If no ingredients found, try pattern matching on all lines
         if not ingredients:
             for line in lines:
+                # Apply same filters
+                if any(url_part in line.lower() for url_part in ['http', 'www.', '.com', '.org']):
+                    continue
+                if re.search(r'\bpage\s+\d+\b|\bp\.\s*\d+\b', line.lower()):
+                    continue
+                if re.search(r'\b(serves?|servings?|yield|makes?)\s+\d+\b', line.lower()):
+                    continue
+                if re.search(r'\b(prep|cook|total)\s+time\b|\b\d+\s+(min|minutes|hrs?|hours?)\b', line.lower()):
+                    continue
+                    
                 if self.is_ingredient_line(line) and len(line) < 200:
                     clean_line = self.clean_ingredient_line(line)
                     if clean_line and len(clean_line) > 2:
                         ingredients.append(clean_line)
         
-        # If still no ingredients, use first few short lines
+        # If still no ingredients, use first few short lines (but apply filters)
         if not ingredients:
             for line in lines[:10]:
+                if any(url_part in line.lower() for url_part in ['http', 'www.', '.com', '.org']):
+                    continue
+                if re.search(r'\bpage\s+\d+\b|\bp\.\s*\d+\b', line.lower()):
+                    continue
+                if re.search(r'\b(serves?|servings?|yield|makes?)\s+\d+\b', line.lower()):
+                    continue
+                if re.search(r'\b(prep|cook|total)\s+time\b|\b\d+\s+(min|minutes|hrs?|hours?)\b', line.lower()):
+                    continue
+                    
                 if (5 < len(line) < 150 and 
                     not self.is_instruction_line(line)):
                     ingredients.append(line)
@@ -555,13 +590,33 @@ class EvernoteToNextcloudConverter:
         """Check if line looks like an ingredient"""
         line_lower = line.lower()
         
+        # Exclude obvious non-ingredients
+        if any(exclude in line_lower for exclude in [
+            'http', 'www.', '.com', '.org', '.net',  # URLs
+            'page', 'serves', 'serving', 'yield',    # Serving info
+            'prep time', 'cook time', 'total time',  # Time info
+            'preheat', 'oven to', 'degrees',         # Cooking instructions
+            'recipe from', 'source:', 'adapted',     # Source info
+            'step', 'instruction', 'direction'       # Instruction headers
+        ]):
+            return False
+        
+        # Skip lines that are too long (likely instructions)
+        if len(line) > 120:
+            return False
+        
+        # Skip lines with cooking verbs that indicate instructions
+        cooking_verbs = ['preheat', 'heat', 'cook', 'bake', 'boil', 'simmer', 'sauté', 'fry', 'mix thoroughly', 'combine all', 'whisk until', 'beat until']
+        if any(verb in line_lower for verb in cooking_verbs):
+            return False
+        
         # Common ingredient patterns
         patterns = [
-            r'\d+\s*(cup|tbsp|tsp|tablespoon|teaspoon|lb|pound|oz|ounce|g|gram|kg|ml|liter|l)\b',
-            r'\d+\s*\w+',  # number followed by word
+            r'\d+\s*(cup|cups|tbsp|tablespoons|tsp|teaspoons|lb|lbs|pound|pounds|oz|ounces|g|grams|kg|ml|liter|liters)\b',
+            r'\d+/\d+\s*(cup|cups|tbsp|tablespoons|tsp|teaspoons)',  # Fractions
             r'^[•\-\*☐✓]\s*\w+',  # bullet point followed by word
-            r'^\d+[\.\)]\s*\w+',  # numbered list
-            r'\b(salt|pepper|sugar|flour|oil|butter|onion|garlic|cheese|milk|egg|water|chicken|beef)\b'
+            r'^\d+[\.\)]\s*[a-zA-Z]',  # numbered list with ingredient
+            r'\b(salt|pepper|sugar|flour|oil|butter|onion|garlic|cheese|milk|egg|eggs|water|chicken|beef|pork|fish)\b'
         ]
         
         return any(re.search(pattern, line_lower) for pattern in patterns)
