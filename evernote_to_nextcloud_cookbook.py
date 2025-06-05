@@ -98,12 +98,13 @@ class EvernoteToNextcloudConverter:
             ingredients = self.extract_ingredients(text_content)
             instructions = self.extract_instructions(text_content)
             description = self.extract_description(text_content)
+            source_url = self.extract_source_url(text_content)
             
             # Create recipe data without image filenames first
             self.recipe_counter += 1
             recipe_data = self.create_recipe_data(
                 self.recipe_counter, title, description, 
-                ingredients, instructions, created, []
+                ingredients, instructions, created, [], source_url
             )
             
             # Create recipe directory with images
@@ -115,7 +116,8 @@ class EvernoteToNextcloudConverter:
 
     def create_recipe_data(self, recipe_id: int, name: str, description: str,
                           ingredients: List[str], instructions: List[str], 
-                          created: Optional[str], image_files: List[str] = None) -> Dict:
+                          created: Optional[str], image_files: List[str] = None, 
+                          source_url: str = "") -> Dict:
         """Create Nextcloud Recipes JSON-LD format"""
         
         # Process instructions to handle image placeholders
@@ -172,7 +174,8 @@ class EvernoteToNextcloudConverter:
             "tool": [],
             "dateCreated": self.format_datetime(created),
             "dateModified": self.format_datetime(None),
-            "url": ""
+            "url": source_url,
+            "orgURL": source_url
         }
         
         return recipe
@@ -222,7 +225,7 @@ class EvernoteToNextcloudConverter:
         updated_recipe_data = self.create_recipe_data(
             recipe_id, recipe_data["name"], recipe_data["description"], 
             recipe_data["recipeIngredient"], original_instructions,
-            recipe_data.get("dateCreated"), image_filenames
+            recipe_data.get("dateCreated"), image_filenames, recipe_data.get("url", "")
         )
         
         # Set the main recipe image (only first image if available)
@@ -411,6 +414,91 @@ class EvernoteToNextcloudConverter:
         content = re.sub(r'^\s+|\s+$', '', content, flags=re.MULTILINE)
         
         return content.strip()
+
+    def extract_source_url(self, content: str) -> str:
+        """Extract potential recipe source URL from content"""
+        if not content:
+            return ""
+        
+        print(f"    Processing content length: {len(content)}")
+        print(f"    Content preview: {content[:200]}...")
+        
+        # Look for URLs with multiple patterns to catch edge cases
+        url_patterns = [
+            r'https?://[^\s<>"\']+\.[^\s<>"\'\)\]]*',  # Standard pattern
+            r'https?://(?:www\.)?seriouseats\.com[^\s<>"\']*',  # SeriousEats with or without www
+            r'https?://www\.seriouseats\.com[^\s<>"\']*',  # Specific for www.SeriousEats
+            r'https?://seriouseats\.com[^\s<>"\']*',  # SeriousEats without www
+            r'https?://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}[^\s<>"\']*'  # More flexible domain pattern
+        ]
+        
+        all_urls = []
+        for pattern in url_patterns:
+            urls = re.findall(pattern, content)
+            all_urls.extend(urls)
+        
+        # Remove duplicates while preserving order
+        urls = []
+        seen = set()
+        for url in all_urls:
+            if url not in seen:
+                urls.append(url)
+                seen.add(url)
+        
+        if not urls:
+            print("    No URLs found")
+            return ""
+        
+        print(f"    Found URLs: {urls}")
+        
+        # Score URLs based on how likely they are to be recipe sources
+        recipe_keywords = [
+            'recipe', 'food', 'cooking', 'kitchen', 'chef', 'cuisine', 'dish',
+            'allrecipes', 'foodnetwork', 'epicurious', 'bonappetit', 'seriouseats',
+            'tasteofhome', 'delish', 'food52', 'yummly', 'budget', 'meal',
+            'ingredient', 'bake', 'cook', 'serious', 'eats'
+        ]
+        
+        scored_urls = []
+        for url in urls:
+            score = 0
+            url_lower = url.lower()
+            
+            # Higher score for recipe-related domains/paths
+            for keyword in recipe_keywords:
+                if keyword in url_lower:
+                    score += 2
+            
+            # Boost score for common recipe sites
+            if any(site in url_lower for site in ['allrecipes.com', 'foodnetwork.com', 
+                                                  'epicurious.com', 'bonappetit.com',
+                                                  'seriouseats.com', 'food52.com', 
+                                                  'tasteofhome.com']):
+                score += 5
+            
+            # Extra boost for SeriousEats specifically
+            if 'seriouseats.com' in url_lower:
+                score += 3
+            
+            # Penalize very long URLs or those with tracking parameters
+            if len(url) > 150 or any(param in url_lower for param in ['utm_', 'ref=', 'src=']):
+                score -= 1
+            
+            scored_urls.append((score, url))
+            print(f"    URL: {url[:70]}... Score: {score}")
+        
+        # Return the highest scoring URL, or first URL if no good matches
+        if scored_urls:
+            scored_urls.sort(key=lambda x: x[0], reverse=True)
+            best_url = scored_urls[0][1]
+            
+            # Clean up the URL (remove trailing punctuation)
+            best_url = re.sub(r'[.,;!?\)\]]+$', '', best_url)
+            
+            print(f"    Selected URL: {best_url}")
+            return best_url
+        
+        return ""
 
     def extract_ingredients(self, content: str) -> List[str]:
         """Extract ingredients from content"""
