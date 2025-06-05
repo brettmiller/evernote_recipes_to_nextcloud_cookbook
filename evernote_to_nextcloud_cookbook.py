@@ -18,6 +18,8 @@ import tempfile
 import shutil
 from typing import Dict, List, Optional, Any
 import html
+import base64
+import hashlib
 
 
 class EvernoteToNextcloudConverter:
@@ -91,21 +93,21 @@ class EvernoteToNextcloudConverter:
             content = content_elem.text or ""
             created = created_elem.text if created_elem is not None else None
             
-            # Parse content
-            text_content = self.parse_content(content)
+            # Parse content and extract images
+            text_content, images = self.parse_content_and_images(content, note)
             ingredients = self.extract_ingredients(text_content)
             instructions = self.extract_instructions(text_content)
             description = self.extract_description(text_content)
             
-            # Create recipe data in simplified format
+            # Create recipe data without image filenames first
             self.recipe_counter += 1
             recipe_data = self.create_recipe_data(
                 self.recipe_counter, title, description, 
-                ingredients, instructions, created
+                ingredients, instructions, created, []
             )
             
-            # Create recipe zip
-            return self.create_recipe_zip(self.recipe_counter, recipe_data, title)
+            # Create recipe directory with images
+            return self.create_recipe_dir(self.recipe_counter, recipe_data, title, images, note)
             
         except Exception as e:
             print(f"Error processing note: {e}")
@@ -113,8 +115,36 @@ class EvernoteToNextcloudConverter:
 
     def create_recipe_data(self, recipe_id: int, name: str, description: str,
                           ingredients: List[str], instructions: List[str], 
-                          created: Optional[str]) -> Dict:
+                          created: Optional[str], image_files: List[str] = None) -> Dict:
         """Create Nextcloud Recipes JSON-LD format"""
+        
+        # Process instructions to handle image placeholders
+        processed_instructions = []
+        for instruction in instructions:
+            if instruction.strip():
+                # Check if this is an image placeholder
+                image_match = re.match(r'\[IMAGE_(\d+)\]', instruction)
+                if image_match:
+                    image_index = int(image_match.group(1))
+                    if image_files and image_index < len(image_files):
+                        # Create an instruction that references the image
+                        processed_instructions.append({
+                            "@type": "HowToStep",
+                            "text": f"See image: {image_files[image_index]}",
+                            "image": image_files[image_index]
+                        })
+                    else:
+                        # Fallback if image not found
+                        processed_instructions.append({
+                            "@type": "HowToStep",
+                            "text": "[Image reference]"
+                        })
+                else:
+                    # Regular text instruction
+                    processed_instructions.append({
+                        "@type": "HowToStep", 
+                        "text": instruction.strip()
+                    })
         
         # Create Nextcloud Recipes format using Recipe schema.org structure
         recipe = {
@@ -122,7 +152,7 @@ class EvernoteToNextcloudConverter:
             "@type": "Recipe",
             "name": name,
             "description": description or "Recipe imported from Evernote",
-            "image": [],
+            "image": "",  # Will be updated later with main recipe image
             "recipeYield": "4",
             "prepTime": "PT15M",
             "cookTime": "PT30M", 
@@ -131,13 +161,7 @@ class EvernoteToNextcloudConverter:
             "recipeCuisine": "",
             "keywords": "imported, evernote",
             "recipeIngredient": [ingredient.strip() for ingredient in ingredients if ingredient.strip()],
-            "recipeInstructions": [
-                {
-                    "@type": "HowToStep",
-                    "text": instruction.strip()
-                }
-                for instruction in instructions if instruction.strip()
-            ],
+            "recipeInstructions": processed_instructions,
             "nutrition": {
                 "@type": "NutritionInformation",
                 "calories": None,
@@ -153,8 +177,8 @@ class EvernoteToNextcloudConverter:
         
         return recipe
 
-    def create_recipe_zip(self, recipe_id: int, recipe_data: Dict, title: str) -> Path:
-        """Create individual recipe directory for Nextcloud Recipes"""
+    def create_recipe_dir(self, recipe_id: int, recipe_data: Dict, title: str, images: List[Dict], note: ET.Element) -> Path:
+        """Create individual recipe directory for Nextcloud Recipes with images"""
         # Create safe directory name
         safe_title = re.sub(r'[^\w\s-]', '', title).strip()
         safe_title = re.sub(r'[\s]+', '_', safe_title)
@@ -164,12 +188,56 @@ class EvernoteToNextcloudConverter:
         recipe_dir = self.temp_dir / recipe_dir_name
         recipe_dir.mkdir(exist_ok=True)
         
+        # Extract and save only the first image
+        image_filenames = []
+        if images:  # Only process the first image
+            try:
+                # Get the first image
+                image_info = images[0]
+                
+                # Save image file with "full" name
+                image_filename = f"full.{image_info['ext']}"
+                image_path = recipe_dir / image_filename
+                
+                with open(image_path, 'wb') as f:
+                    f.write(image_info['data'])
+                
+                image_filenames.append(image_filename)
+                print(f"    Saved image: {image_filename}")
+                
+            except Exception as e:
+                print(f"    Error saving image: {e}")
+        
+        # Update recipe data with actual image filenames and regenerate instructions
+        # Get the text content again to extract original instructions with placeholders
+        title_elem = note.find('title')
+        content_elem = note.find('content')
+        content = content_elem.text if content_elem is not None else ""
+        
+        # Re-parse content to get instructions with image placeholders
+        text_content, _ = self.parse_content_and_images(content, note)
+        original_instructions = self.extract_instructions(text_content)
+        
+        # Recreate the recipe data with proper image filenames
+        updated_recipe_data = self.create_recipe_data(
+            recipe_id, recipe_data["name"], recipe_data["description"], 
+            recipe_data["recipeIngredient"], original_instructions,
+            recipe_data.get("dateCreated"), image_filenames
+        )
+        
+        # Set the main recipe image (only first image if available)
+        if image_filenames:
+            # Only put the first image as the main recipe image
+            updated_recipe_data["image"] = image_filenames[0]
+        else:
+            updated_recipe_data["image"] = ""
+        
         # Create recipe.json file in the directory
         json_file = recipe_dir / "recipe.json"
         with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(recipe_data, f, indent=2, ensure_ascii=False)
+            json.dump(updated_recipe_data, f, indent=2, ensure_ascii=False)
         
-        print(f"  Recipe {recipe_id}: {title}")
+        print(f"  Recipe {recipe_id}: {title} ({len(image_filenames)} images)")
         return recipe_dir
 
     def create_export_zip(self, recipe_dirs: List[Path]):
@@ -186,6 +254,130 @@ class EvernoteToNextcloudConverter:
         print(f"\nExport created: {self.output_file}")
         print(f"Recipes: {len(recipe_dirs)}")
         print("Import into Nextcloud Recipes or other systems that support Schema.org Recipe format")
+
+    def parse_content_and_images(self, content: str, note: ET.Element) -> tuple[str, List[Dict]]:
+        """Parse ENML to plain text and extract images with their positions"""
+        if not content:
+            return "", []
+        
+        # Extract images from resources in the note and create a mapping
+        images = []
+        image_hash_to_data = {}
+        resources = note.findall('.//resource')
+        
+        for resource in resources:
+            try:
+                # Get the resource data
+                data_elem = resource.find('data')
+                mime_elem = resource.find('mime')
+                
+                if data_elem is not None and mime_elem is not None:
+                    # Check if it's an image
+                    mime_type = mime_elem.text
+                    if mime_type and mime_type.startswith('image/'):
+                        # Get the hash attribute for matching with en-media tags
+                        # Try multiple ways to get the hash
+                        resource_hash = None
+                        
+                        # Check data element attributes first
+                        if hasattr(data_elem, 'attrib'):
+                            for attr_name, attr_value in data_elem.attrib.items():
+                                if 'hash' in attr_name.lower():
+                                    resource_hash = attr_value
+                                    break
+                        
+                        # Check resource element attributes
+                        if not resource_hash and hasattr(resource, 'attrib'):
+                            for attr_name, attr_value in resource.attrib.items():
+                                if 'hash' in attr_name.lower():
+                                    resource_hash = attr_value
+                                    break
+                        
+                        # If still no hash found, create one from the data
+                        if not resource_hash:
+                            resource_hash = hashlib.md5(data_elem.text.encode()).hexdigest()
+                        
+                        print(f"    Found image with hash: {resource_hash[:8]}...")
+                        
+                        # Decode base64 image data
+                        image_data = base64.b64decode(data_elem.text)
+                        
+                        # Determine file extension from mime type
+                        ext_map = {
+                            'image/jpeg': 'jpg',
+                            'image/jpg': 'jpg', 
+                            'image/png': 'png',
+                            'image/gif': 'gif',
+                            'image/webp': 'webp',
+                            'image/bmp': 'bmp'
+                        }
+                        ext = ext_map.get(mime_type, 'jpg')
+                        
+                        image_info = {
+                            'data': image_data,
+                            'mime': mime_type,
+                            'ext': ext,
+                            'hash': resource_hash
+                        }
+                        
+                        images.append(image_info)
+                        image_hash_to_data[resource_hash] = len(images) - 1
+                        
+            except Exception as e:
+                print(f"    Error processing image: {e}")
+                continue
+        
+        # Parse text content and replace en-media tags with image placeholders
+        text_content = self.parse_content_with_image_placeholders(content, image_hash_to_data)
+        
+        return text_content, images
+
+    def parse_content_with_image_placeholders(self, content: str, image_hash_to_data: Dict) -> str:
+        """Parse ENML to plain text and insert image placeholders where images appear"""
+        if not content:
+            return ""
+        
+        # Decode HTML entities
+        content = html.unescape(content)
+        
+        # Remove ENML wrapper
+        content = re.sub(r'<\?xml[^>]*\?>', '', content)
+        content = re.sub(r'<!DOCTYPE[^>]*>', '', content)
+        content = re.sub(r'<en-note[^>]*>', '', content)
+        content = re.sub(r'</en-note>', '', content)
+        
+        # Replace en-media tags with image placeholders
+        def replace_media(match):
+            hash_attr = match.group(1)
+            print(f"    Found en-media tag with hash: {hash_attr[:8]}...")
+            if hash_attr in image_hash_to_data:
+                image_index = image_hash_to_data[hash_attr]
+                print(f"    Replacing with IMAGE_{image_index}")
+                return f"\n[IMAGE_{image_index}]\n"
+            else:
+                print(f"    Hash not found in mapping")
+            return "\n[IMAGE]\n"
+        
+        content = re.sub(r'<en-media[^>]*hash="([^"]*)"[^>]*/?>', replace_media, content)
+        
+        # Handle checkboxes and convert to unicode
+        content = re.sub(r'<en-todo[^>]*checked="true"[^>]*>', '✓ ', content)
+        content = re.sub(r'<en-todo[^>]*>', '☐ ', content)
+        
+        # Convert line breaks and divs to newlines
+        content = re.sub(r'<br[^>]*>', '\n', content)
+        content = re.sub(r'<div[^>]*>', '\n', content)
+        content = re.sub(r'</div>', '', content)
+        
+        # Remove remaining HTML tags
+        content = re.sub(r'<[^>]+>', '\n', content)
+        
+        # Clean up whitespace
+        content = re.sub(r'\n+', '\n', content)
+        content = re.sub(r'[ \t]+', ' ', content)
+        content = re.sub(r'^\s+|\s+$', '', content, flags=re.MULTILINE)
+        
+        return content.strip()
 
     def parse_content(self, content: str) -> str:
         """Parse ENML to plain text"""
@@ -287,13 +479,16 @@ class EvernoteToNextcloudConverter:
         return any(re.search(pattern, line_lower) for pattern in patterns)
 
     def extract_instructions(self, content: str) -> List[str]:
-        """Extract cooking instructions"""
+        """Extract cooking instructions with inline images"""
         lines = [line.strip() for line in content.split('\n') if line.strip()]
         instructions = []
         
-        # Look for instruction patterns
+        # Look for instruction patterns and include image placeholders
         for line in lines:
-            if self.is_instruction_line(line) and len(line) > 15:
+            # Check if this is an image placeholder
+            if re.match(r'\[IMAGE_\d+\]', line):
+                instructions.append(line)  # Keep image placeholders as separate instructions
+            elif self.is_instruction_line(line) and len(line) > 15:
                 clean_line = self.clean_instruction_line(line)
                 if clean_line:
                     instructions.append(clean_line)
@@ -301,16 +496,18 @@ class EvernoteToNextcloudConverter:
         # Fallback: use longer lines that aren't ingredients
         if not instructions:
             for line in lines:
-                if (len(line) > 25 and 
-                    not self.is_ingredient_line(line) and
-                    len(line) < 500):
+                if re.match(r'\[IMAGE_\d+\]', line):
+                    instructions.append(line)
+                elif (len(line) > 25 and 
+                      not self.is_ingredient_line(line) and
+                      len(line) < 500):
                     instructions.append(line)
         
         # Ensure at least one instruction
         if not instructions:
             instructions.append("Follow the original recipe instructions from your Evernote note.")
         
-        return instructions[:20]  # Limit to reasonable number
+        return instructions[:30]  # Increased limit to accommodate images
 
     def clean_instruction_line(self, line: str) -> str:
         """Clean up an instruction line"""
