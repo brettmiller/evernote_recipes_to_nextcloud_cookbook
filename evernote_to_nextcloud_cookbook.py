@@ -23,7 +23,7 @@ import hashlib
 
 
 class EvernoteToNextcloudConverter:
-    def __init__(self, input_dir: str, output_file: str):
+    def __init__(self, input_dir: str, output_file: str, debug: bool = False):
         self.input_dir = Path(input_dir)
         self.output_file = Path(output_file)
         if not self.output_file.suffix:
@@ -32,6 +32,7 @@ class EvernoteToNextcloudConverter:
         # Create temporary directory
         self.temp_dir = Path(tempfile.mkdtemp())
         self.recipe_counter = 0
+        self.debug = debug
 
     def convert(self):
         """Main conversion method"""
@@ -93,9 +94,10 @@ class EvernoteToNextcloudConverter:
             content = content_elem.text or ""
             created = created_elem.text if created_elem is not None else None
             
-            print(f"\n{'='*80}")
-            print(f"PROCESSING RECIPE: {title}")
-            print(f"{'='*80}")
+            if self.debug:
+                print(f"\n{'='*80}")
+                print(f"PROCESSING RECIPE: {title}")
+                print(f"{'='*80}")
             
             # Parse content and extract images
             text_content, images = self.parse_content_and_images(content, note)
@@ -107,12 +109,13 @@ class EvernoteToNextcloudConverter:
             # Post-process instructions to move misclassified ingredients back to ingredients list
             final_ingredients, final_instructions = self.post_process_ingredients_from_instructions(ingredients, instructions, title)
             
-            print(f"\n{'='*80}")
-            print(f"FINISHED PROCESSING: {title}")
-            print(f"  - Ingredients: {len(final_ingredients)}")
-            print(f"  - Instructions: {len(final_instructions)}")
-            print(f"  - Images: {len(images)}")
-            print(f"{'='*80}\n")
+            if self.debug:
+                print(f"\n{'='*80}")
+                print(f"FINISHED PROCESSING: {title}")
+                print(f"  - Ingredients: {len(final_ingredients)}")
+                print(f"  - Instructions: {len(final_instructions)}")
+                print(f"  - Images: {len(images)}")
+                print(f"{'='*80}\n")
             
             # Create recipe data without image filenames first
             self.recipe_counter += 1
@@ -220,7 +223,8 @@ class EvernoteToNextcloudConverter:
                     f.write(image_info['data'])
                 
                 image_filenames.append(image_filename)
-                print(f"    Saved image: {image_filename}")
+                if self.debug:
+                    print(f"    Saved image: {image_filename}")
                 
             except Exception as e:
                 print(f"    Error saving image: {e}")
@@ -317,7 +321,8 @@ class EvernoteToNextcloudConverter:
                         if not resource_hash:
                             resource_hash = hashlib.md5(data_elem.text.encode()).hexdigest()
                         
-                        print(f"    Found image with hash: {resource_hash[:8]}...")
+                        if self.debug:
+                            print(f"    Found image with hash: {resource_hash[:8]}...")
                         
                         # Decode base64 image data
                         image_data = base64.b64decode(data_elem.text)
@@ -369,13 +374,16 @@ class EvernoteToNextcloudConverter:
         # Replace en-media tags with image placeholders
         def replace_media(match):
             hash_attr = match.group(1)
-            print(f"    Found en-media tag with hash: {hash_attr[:8]}...")
+            if self.debug:
+                print(f"    Found en-media tag with hash: {hash_attr[:8]}...")
             if hash_attr in image_hash_to_data:
                 image_index = image_hash_to_data[hash_attr]
-                print(f"    Replacing with IMAGE_{image_index}")
+                if self.debug:
+                    print(f"    Replacing with IMAGE_{image_index}")
                 return f"\n[IMAGE_{image_index}]\n"
             else:
-                print(f"    Hash not found in mapping")
+                if self.debug:
+                    print(f"    Hash not found in mapping")
             return "\n[IMAGE]\n"
         
         content = re.sub(r'<en-media[^>]*hash="([^"]*)"[^>]*/?>', replace_media, content)
@@ -437,8 +445,9 @@ class EvernoteToNextcloudConverter:
         if not content:
             return ""
         
-        print(f"    Processing content length: {len(content)}")
-        print(f"    Content preview: {content[:200]}...")
+        if self.debug:
+            print(f"    Processing content length: {len(content)}")
+            print(f"    Content preview: {content[:200]}...")
         
         # Look for URLs with multiple patterns to catch edge cases
         url_patterns = [
@@ -463,10 +472,12 @@ class EvernoteToNextcloudConverter:
                 seen.add(url)
         
         if not urls:
-            print("    No URLs found")
+            if self.debug:
+                print("    No URLs found")
             return ""
         
-        print(f"    Found URLs: {urls}")
+        if self.debug:
+            print(f"    Found URLs: {urls}")
         
         # Score URLs based on how likely they are to be recipe sources
         recipe_keywords = [
@@ -502,7 +513,8 @@ class EvernoteToNextcloudConverter:
                 score -= 1
             
             scored_urls.append((score, url))
-            print(f"    URL: {url[:70]}... Score: {score}")
+            if self.debug:
+                print(f"    URL: {url[:70]}... Score: {score}")
         
         # Return the highest scoring URL, or first URL if no good matches
         if scored_urls:
@@ -512,7 +524,8 @@ class EvernoteToNextcloudConverter:
             # Clean up the URL (remove trailing punctuation)
             best_url = re.sub(r'[.,;!?\)\]]+$', '', best_url)
             
-            print(f"    Selected URL: {best_url}")
+            if self.debug:
+                print(f"    Selected URL: {best_url}")
             return best_url
         
         return ""
@@ -523,16 +536,17 @@ class EvernoteToNextcloudConverter:
         ingredients = []
         substitution_notes = []
         
-        print(f"\n{'#'*80}")
-        print(f"# INGREDIENT EXTRACTION - {recipe_title}")
-        print(f"{'#'*80}")
-        print(f"Total lines to process: {len(lines)}")
-        
-        # Show first 20 lines for debugging
-        print("=== ALL LINES TO PROCESS ===")
-        for i, line in enumerate(lines):
-            print(f"  {i+1:2d}. '{line[:60]}{'...' if len(line) > 60 else ''}'")
-        print("=" * 50)
+        if self.debug:
+            print(f"\n{'#'*80}")
+            print(f"# INGREDIENT EXTRACTION - {recipe_title}")
+            print(f"{'#'*80}")
+            print(f"Total lines to process: {len(lines)}")
+            
+            # Show first 20 lines for debugging
+            print("=== ALL LINES TO PROCESS ===")
+            for i, line in enumerate(lines):
+                print(f"  {i+1:2d}. '{line[:60]}{'...' if len(line) > 60 else ''}'")
+            print("=" * 50)
         
         # First pass: collect substitution notes
         for line in lines:
@@ -572,7 +586,8 @@ class EvernoteToNextcloudConverter:
             # CRITICAL FIX: Always check is_ingredient_line() first, even if in ingredients section
             clean_line = self.clean_ingredient_line(line)
             if not clean_line or len(clean_line) <= 2:
-                print(f"REJECTED (too short after cleaning): '{line}' -> '{clean_line}'")
+                if self.debug:
+                    print(f"REJECTED (too short after cleaning): '{line}' -> '{clean_line}'")
                 continue
                 
             # Apply the ingredient filtering logic - this is the key fix
@@ -585,27 +600,32 @@ class EvernoteToNextcloudConverter:
                 if (len(clean_line) > 3 and len(clean_line) < 100 and
                     not any(verb in clean_line.lower() for verb in ['heat', 'cook', 'bake', 'mix', 'stir', 'add', 'pour', 'remove']) and
                     not clean_line.lower().startswith(('step', 'then', 'next', 'meanwhile', 'after', 'before', 'until'))):
-                    print(f"ACCEPTED (in ingredient section): '{clean_line}'")
+                    if self.debug:
+                        print(f"ACCEPTED (in ingredient section): '{clean_line}'")
                     enhanced_ingredient = self.enhance_ingredient_with_substitutions(clean_line, substitution_notes)
                     ingredients.append(enhanced_ingredient)
-                    print(f"ADDED INGREDIENT (pass 1 - section context): '{enhanced_ingredient}'")
+                    if self.debug:
+                        print(f"ADDED INGREDIENT (pass 1 - section context): '{enhanced_ingredient}'")
                     continue
             
             if is_ingredient and len(line) < 200:  # Must pass ingredient test AND length check
                 # Try to match with substitution notes
                 enhanced_ingredient = self.enhance_ingredient_with_substitutions(clean_line, substitution_notes)
                 ingredients.append(enhanced_ingredient)
-                print(f"ADDED INGREDIENT (pass 1): '{enhanced_ingredient}'")
+                if self.debug:
+                    print(f"ADDED INGREDIENT (pass 1): '{enhanced_ingredient}'")
             else:
                 # Debug why this line was rejected
-                if len(line) >= 200:
-                    print(f"REJECTED (too long): '{line[:50]}...' ({len(line)} chars)")
-                else:
-                    print(f"REJECTED LINE: '{line[:60]}...' (is_ingredient={is_ingredient}, in_section={in_ingredients_section})")
+                if self.debug:
+                    if len(line) >= 200:
+                        print(f"REJECTED (too long): '{line[:50]}...' ({len(line)} chars)")
+                    else:
+                        print(f"REJECTED LINE: '{line[:60]}...' (is_ingredient={is_ingredient}, in_section={in_ingredients_section})")
         
         # If no ingredients found, try pattern matching on all lines
         if not ingredients:
-            print("No ingredients found in pass 1, trying pass 2...")
+            if self.debug:
+                print("No ingredients found in pass 1, trying pass 2...")
             for line in lines:
                 # Apply same filters
                 if any(url_part in line.lower() for url_part in ['http', 'www.', '.com', '.org']):
@@ -622,24 +642,31 @@ class EvernoteToNextcloudConverter:
                     if clean_line and len(clean_line) > 2:
                         enhanced_ingredient = self.enhance_ingredient_with_substitutions(clean_line, substitution_notes)
                         ingredients.append(enhanced_ingredient)
-                        print(f"ADDED INGREDIENT (pass 2): '{enhanced_ingredient}'")
+                        if self.debug:
+                            print(f"ADDED INGREDIENT (pass 2): '{enhanced_ingredient}'")
         
         # If still no ingredients, use first few short lines (but apply strict filters)
         if not ingredients:
-            print("No ingredients found in pass 2, trying pass 3 (first 10 lines)...")
+            if self.debug:
+                print("No ingredients found in pass 2, trying pass 3 (first 10 lines)...")
             for i, line in enumerate(lines[:10]):
-                print(f"  Line {i+1}: '{line[:80]}...'")
+                if self.debug:
+                    print(f"  Line {i+1}: '{line[:80]}...'")
                 if any(url_part in line.lower() for url_part in ['http', 'www.', '.com', '.org']):
-                    print(f"    REJECTED: Contains URL")
+                    if self.debug:
+                        print(f"    REJECTED: Contains URL")
                     continue
                 if re.search(r'\bpage\s+\d+\b|\bp\.\s*\d+\b', line.lower()):
-                    print(f"    REJECTED: Contains page reference")
+                    if self.debug:
+                        print(f"    REJECTED: Contains page reference")
                     continue
                 if re.search(r'\b(serves?|servings?|yield|makes?)\s+\d+\b', line.lower()):
-                    print(f"    REJECTED: Contains serving info")
+                    if self.debug:
+                        print(f"    REJECTED: Contains serving info")
                     continue
                 if re.search(r'\b(prep|cook|total)\s+time\b|\b\d+\s+(min|minutes|hrs?|hours?)\b', line.lower()):
-                    print(f"    REJECTED: Contains time info")
+                    if self.debug:
+                        print(f"    REJECTED: Contains time info")
                     continue
                     
                 # MUST pass the strict ingredient test - no fallback to instruction test
@@ -647,17 +674,20 @@ class EvernoteToNextcloudConverter:
                     self.is_ingredient_line(line)):  # Use strict ingredient test, not instruction test
                     enhanced_ingredient = self.enhance_ingredient_with_substitutions(line, substitution_notes)
                     ingredients.append(enhanced_ingredient)
-                    print(f"    ADDED INGREDIENT (pass 3): '{enhanced_ingredient}'")
+                    if self.debug:
+                        print(f"    ADDED INGREDIENT (pass 3): '{enhanced_ingredient}'")
                 else:
-                    is_ingredient = self.is_ingredient_line(line)
-                    print(f"    REJECTED: length={len(line)}, is_ingredient={is_ingredient}")
+                    if self.debug:
+                        is_ingredient = self.is_ingredient_line(line)
+                        print(f"    REJECTED: length={len(line)}, is_ingredient={is_ingredient}")
         
-        print(f"=== FINAL INGREDIENT COUNT: {len(ingredients)} ===")
-        for i, ing in enumerate(ingredients):
-            print(f"  {i+1}. {ing}")
-        print("=" * 50)
-        print(f"# END INGREDIENT EXTRACTION - {recipe_title}")
-        print(f"{'#'*80}")
+        if self.debug:
+            print(f"=== FINAL INGREDIENT COUNT: {len(ingredients)} ===")
+            for i, ing in enumerate(ingredients):
+                print(f"  {i+1}. {ing}")
+            print("=" * 50)
+            print(f"# END INGREDIENT EXTRACTION - {recipe_title}")
+            print(f"{'#'*80}")
         
         return ingredients[:25]  # Limit to reasonable number
 
@@ -677,32 +707,12 @@ class EvernoteToNextcloudConverter:
 
     def is_ingredient_line(self, line: str) -> bool:
         """Check if line looks like an ingredient with improved filtering"""
-        debug_line = ("1 cup (160 g) finely diced onions" in line or 
-                     "4 cups (940 ml) vegetable broth" in line or 
-                     "1 tablespoon (8 g) garlic powder" in line or
-                     "2 teaspoons turmeric" in line or
-                     "1 cup (96 g) TVP granules" in line or
-                     "12 ounces (336 g) uncooked elbow macaroni" in line or
-                     "salt and pepper to taste" in line.lower() or
-                     "drain the noodles" in line.lower() or
-                     "additional seasonings to taste" in line.lower())
-        
-        if debug_line:
-            print(f"    DEBUG LINE: '{line[:50]}...'")
-        
         if not line or len(line.strip()) < 3:
-            if debug_line:
-                print(f"    DEBUG: REJECTED by length check")
             return False
         
         # Clean the line first to remove bullet points and other formatting
         clean_line = self.clean_ingredient_line(line)
-        if debug_line:
-            print(f"    DEBUG: cleaned line: '{clean_line}'")
-            
         if not clean_line or len(clean_line.strip()) < 3:
-            if debug_line:
-                print(f"    DEBUG: REJECTED by cleaned length check")
             return False
         
         line_lower = clean_line.lower()
@@ -715,12 +725,7 @@ class EvernoteToNextcloudConverter:
         if (re.search(r'\bto\s+taste\b', line_lower) or re.search(r'\bsalt\s+and\s+pepper\b', line_lower)):
             # Only accept as ingredient if it's a short line that doesn't start with instruction verbs
             if first_word not in instruction_starters_early and len(clean_line) < 50:
-                if debug_line:
-                    print(f"    DEBUG: ACCEPTED early - short 'to taste'/'salt and pepper' line without instruction verb")
                 return True
-            else:
-                if debug_line:
-                    print(f"    DEBUG: Contains 'to taste' but starts with instruction verb '{first_word}' or too long ({len(clean_line)} chars) - continuing checks")
         
         # STEP 1: Reject lines that are clearly cooking instructions (start with action verbs)
         instruction_starters = [
@@ -736,19 +741,13 @@ class EvernoteToNextcloudConverter:
         
         # Check if line starts with an instruction verb (use cleaned line)
         first_word = line_lower.split()[0] if line_lower.split() else ""
-        if debug_line:
-            print(f"    DEBUG: First word is: '{first_word}'")
         if first_word in instruction_starters:
-            if debug_line:
-                print(f"    DEBUG: REJECTED by instruction starter: '{first_word}'")
             return False
         
         # STEP 2: Reject numbered instructions (1., 2., Step 1, etc.) - but NOT ingredient quantities
         # Only reject if number is followed by period/parenthesis/dash AND space (like "1. Mix" or "1) Heat" or "1 - Stir")
         # NOT if it's followed by a measurement unit (like "1 cup" or "12 ounces")
         if re.match(r'^\d+[\.\)\-]\s', clean_line) or line_lower.startswith('step'):
-            if debug_line:
-                print(f"    DEBUG: REJECTED by numbered instruction pattern")
             return False
         
         # STEP 3: Reject section headers
@@ -759,8 +758,6 @@ class EvernoteToNextcloudConverter:
         ]
         
         if any(line_lower.startswith(header) for header in section_headers):
-            if debug_line:
-                print(f"    DEBUG: REJECTED by section header")
             return False
         
         # STEP 4: Reject lines that are clearly procedural text
@@ -780,18 +777,11 @@ class EvernoteToNextcloudConverter:
                 break
         
         if found_procedural:
-            if debug_line:
-                print(f"    DEBUG: REJECTED by procedural phrase: '{found_procedural}'")
             return False
         
         # STEP 5: Reject very long lines (likely instructions)
         if len(line) > 200:
-            if debug_line:
-                print(f"    DEBUG: REJECTED by length ({len(line)} chars)")
             return False
-        
-        if debug_line:
-            print(f"    DEBUG: Passed all early rejection checks, testing patterns...")
         
         # STEP 6: Look for positive ingredient indicators
         # Common measurement units
@@ -841,19 +831,9 @@ class EvernoteToNextcloudConverter:
         ]
         
         # Check enhanced patterns first (use cleaned line)
-        for i, pattern in enumerate(ingredient_patterns):
-            if debug_line:
-                print(f"    DEBUG: Testing pattern {i+1}: {pattern}")
-                print(f"    DEBUG: Against clean_line: '{clean_line}'")
+        for pattern in ingredient_patterns:
             if re.match(pattern, clean_line, re.IGNORECASE):
-                if debug_line:
-                    print(f"    DEBUG: MATCHED ingredient pattern {i+1}: {pattern}")
                 return True
-            elif debug_line:
-                print(f"    DEBUG: Pattern {i+1} did not match")
-        
-        if debug_line:
-            print(f"    DEBUG: No enhanced patterns matched, checking fallback patterns...")
         
         # Check if line contains measurements (strong indicator of ingredient)
         has_measurement = any(re.search(r'^\s*\d+.*?\b' + re.escape(measure) + r'\b', line_lower) or
@@ -868,8 +848,6 @@ class EvernoteToNextcloudConverter:
         
         # Must have at least one positive indicator
         if not (has_measurement or has_fraction or starts_with_number):
-            if debug_line:
-                print(f"    DEBUG: REJECTED - no measurement/fraction/number indicators")
             return False
         
         # STEP 8: Additional checks for common ingredient patterns
@@ -882,12 +860,7 @@ class EvernoteToNextcloudConverter:
         
         instruction_word_count = sum(1 for word in instruction_words if word in line_lower)
         if instruction_word_count > 1:  # More than 1 instruction word = likely instruction
-            if debug_line:
-                print(f"    DEBUG: REJECTED - too many instruction words ({instruction_word_count})")
             return False
-        
-        if debug_line:
-            print(f"    DEBUG: ACCEPTED as ingredient")
         
         return True
 
@@ -973,10 +946,11 @@ class EvernoteToNextcloudConverter:
         lines = [line.strip() for line in content.split('\n') if line.strip()]
         instructions = []
         
-        print(f"\n{'*'*80}")
-        print(f"* INSTRUCTION EXTRACTION - {recipe_title}")
-        print(f"{'*'*80}")
-        print(f"Total lines to process: {len(lines)}")
+        if self.debug:
+            print(f"\n{'*'*80}")
+            print(f"* INSTRUCTION EXTRACTION - {recipe_title}")
+            print(f"{'*'*80}")
+            print(f"Total lines to process: {len(lines)}")
         
         # Get all substitution notes to exclude them from instructions
         substitution_notes = []
@@ -986,30 +960,21 @@ class EvernoteToNextcloudConverter:
         
         # Look for instruction patterns and include image placeholders
         for line in lines:
-            # Debug the problematic lines in instructions too
-            debug_line = ("grate your cheese" in line.lower() or 
-                         "drain the noodles" in line.lower() or
-                         "remove from heat" in line.lower() or
-                         "allow to stand" in line.lower())
-            if debug_line:
-                print(f"\n    DEBUG instruction check for: '{line[:80]}...'")
-                print(f"    DEBUG: is_instruction_line = {self.is_instruction_line(line)}")
-                print(f"    DEBUG: is_ingredient_line = {self.is_ingredient_line(line)}")
-                print(f"    DEBUG: len(line) = {len(line)}")
-            
             # Skip URLs completely
             if any(url_part in line.lower() for url_part in ['http', 'www.', '.com', '.org']):
+                if self.debug:
+                    print(f"    DEBUG: SKIPPED - contains URL")
                 continue
                 
             # Skip page numbers and references
             if re.search(r'\bpage\s+\d+\b|\bp\.\s*\d+\b', line.lower()):
-                if debug_line:
+                if self.debug:
                     print(f"    DEBUG: SKIPPED - contains page reference")
                 continue
                 
             # Skip ONLY standalone time information like "Prep time: 15 minutes" but NOT cooking instructions with time
             if re.search(r'\b(prep|cook|total)\s+time\b', line.lower()):
-                if debug_line:
+                if self.debug:
                     print(f"    DEBUG: SKIPPED - contains standalone time info")
                 continue
                 
@@ -1020,40 +985,41 @@ class EvernoteToNextcloudConverter:
             
             # Skip substitution notes that are already in ingredients
             if any(note in line.lower() for note in substitution_notes):
+                if self.debug:
+                    print(f"    DEBUG: SKIPPED - substitution note")
                 continue
             
             # Check if this is an image placeholder
             if re.match(r'\[IMAGE_\d+\]', line):
                 instructions.append(line)  # Keep image placeholders as separate instructions
-                if debug_line:
+                if self.debug:
                     print(f"    DEBUG: ADDED as IMAGE placeholder")
             elif (self.is_instruction_line(line) and 
                   len(line) > 15 and 
                   not self.is_ingredient_line(line)):  # Make sure it's not also an ingredient
                 clean_line = self.clean_instruction_line(line)
-                if debug_line:
-                    print(f"    DEBUG: clean_instruction_line returned: '{clean_line}'")
                 if clean_line:
                     instructions.append(clean_line)
-                    if debug_line:
-                        print(f"    DEBUG: ADDED as INSTRUCTION: '{clean_line}'")
+                    if self.debug:
+                        print(f"    DEBUG: ADDED as INSTRUCTION: '{clean_line[:50]}...'")
                 else:
-                    if debug_line:
+                    if self.debug:
                         print(f"    DEBUG: REJECTED - clean_instruction_line returned empty/None")
             else:
-                if debug_line:
+                if self.debug:
                     is_instruction = self.is_instruction_line(line)
                     is_ingredient = self.is_ingredient_line(line)
                     print(f"    DEBUG: REJECTED instruction - is_instruction={is_instruction}, is_ingredient={is_ingredient}, len={len(line)}")
                     if is_instruction and is_ingredient:
                         print(f"    DEBUG: Line classified as BOTH instruction and ingredient - rejecting as instruction")
         
-        print(f"=== FINAL INSTRUCTION COUNT: {len(instructions)} ===")
-        for i, inst in enumerate(instructions):
-            print(f"  {i+1}. {inst[:100]}...")
-        print("=" * 50)
-        print(f"* END INSTRUCTION EXTRACTION - {recipe_title}")
-        print(f"{'*'*80}")
+        if self.debug:
+            print(f"=== FINAL INSTRUCTION COUNT: {len(instructions)} ===")
+            for i, inst in enumerate(instructions):
+                print(f"  {i+1}. {inst[:100]}...")
+            print("=" * 50)
+            print(f"* END INSTRUCTION EXTRACTION - {recipe_title}")
+            print(f"{'*'*80}")
         
         # Fallback: use longer lines that aren't ingredients
         if not instructions:
@@ -1083,48 +1049,28 @@ class EvernoteToNextcloudConverter:
 
     def clean_instruction_line(self, line: str) -> str:
         """Clean up an instruction line"""
-        # Debug for the specific missing line
-        debug_this_line = "remove from heat" in line.lower() and "allow to stand" in line.lower()
-        if debug_this_line:
-            print(f"\n      DEBUG clean_instruction_line input: '{line}'")
-        
         # Remove bullet points and checkmarks
         line = re.sub(r'^[•\-\*☐✓]\s*', '', line)
         # Remove leading numbers with periods/parentheses
         line = re.sub(r'^\d+[\.\)]\s*', '', line)
         
-        result = line.strip()
-        if debug_this_line:
-            print(f"      DEBUG clean_instruction_line output: '{result}'")
-        
-        return result
+        return line.strip()
 
     def is_instruction_line(self, line: str) -> bool:
         """Check if line looks like an instruction"""
         line_lower = line.lower()
         
-        # Debug for the specific missing line
-        debug_this_line = "remove from heat" in line_lower and "allow to stand" in line_lower
-        if debug_this_line:
-            print(f"\n      DEBUG is_instruction_line for: '{line[:50]}...'")
-        
         # Exclude serving/yield info first
         if re.search(r'\b(serves?|servings?|yield|makes?)\s+\d+\b', line_lower):
-            if debug_this_line:
-                print(f"      DEBUG: REJECTED - contains yield/serving info")
             return False
         
         # Exclude time information (but not cooking instructions that mention time)
         # Only reject standalone time references like "Prep time: 15 minutes" or "Cook time: 30 min"
         if re.search(r'\b(prep|cook|total)\s+time\b', line_lower):
-            if debug_this_line:
-                print(f"      DEBUG: REJECTED - contains time info")
             return False
         
         # Must be longer than typical ingredients
         if len(line) < 20:
-            if debug_this_line:
-                print(f"      DEBUG: REJECTED - too short ({len(line)} chars)")
             return False
         
         instruction_keywords = [
@@ -1138,11 +1084,6 @@ class EvernoteToNextcloudConverter:
         
         # Use word boundaries to match complete words only
         has_instruction_keyword = any(re.search(r'\b' + re.escape(keyword) + r'\b', line_lower) for keyword in instruction_keywords)
-        
-        if debug_this_line:
-            print(f"      DEBUG: has_instruction_keyword = {has_instruction_keyword}")
-            matching_keywords = [kw for kw in instruction_keywords if re.search(r'\b' + re.escape(kw) + r'\b', line_lower)]
-            print(f"      DEBUG: matching keywords = {matching_keywords}")
         
         return has_instruction_keyword
 
@@ -1184,9 +1125,10 @@ class EvernoteToNextcloudConverter:
 
     def post_process_ingredients_from_instructions(self, ingredients: List[str], instructions: List[str], recipe_title: str = "Unknown Recipe") -> tuple[List[str], List[str]]:
         """Post-process instructions to find misclassified ingredients and move them back"""
-        print(f"\n{'~'*80}")
-        print(f"~ POST-PROCESSING INGREDIENTS FROM INSTRUCTIONS - {recipe_title}")
-        print(f"{'~'*80}")
+        if self.debug:
+            print(f"\n{'~'*80}")
+            print(f"~ POST-PROCESSING INGREDIENTS FROM INSTRUCTIONS - {recipe_title}")
+            print(f"{'~'*80}")
         
         new_ingredients = ingredients.copy()
         new_instructions = []
@@ -1199,11 +1141,6 @@ class EvernoteToNextcloudConverter:
                 continue
             
             instruction_lower = instruction.lower()
-            
-            # Debug the specific problematic line
-            if "optional additional seasonings" in instruction_lower:
-                print(f"  DEBUG: Found target line: '{instruction}'")
-                print(f"  DEBUG: instruction_lower: '{instruction_lower}'")
             
             # Check for patterns that indicate this is actually ingredient information
             ingredient_indicators = [
@@ -1232,22 +1169,15 @@ class EvernoteToNextcloudConverter:
             
             if not has_cooking_verbs:  # Only consider if no cooking verbs present
                 for j, pattern in enumerate(ingredient_indicators):
-                    if "optional additional seasonings" in instruction_lower:
-                        print(f"    DEBUG: Testing pattern {j+1}: {pattern}")
                     if re.search(pattern, instruction_lower):
-                        if "optional additional seasonings" in instruction_lower:
-                            print(f"    DEBUG: MATCHED pattern {j+1}!")
                         is_likely_ingredient = True
                         matched_pattern = pattern
                         break
-                    elif "optional additional seasonings" in instruction_lower:
-                        print(f"    DEBUG: No match for pattern {j+1}")
-            elif "optional additional seasonings" in instruction_lower:
-                print(f"    DEBUG: Skipped due to cooking verbs: {[verb for verb in cooking_verbs if verb in instruction_lower]}")
             
             if is_likely_ingredient:
-                print(f"  MOVING TO INGREDIENTS: '{instruction[:80]}...'")
-                print(f"    Matched pattern: {matched_pattern}")
+                if self.debug:
+                    print(f"  MOVING TO INGREDIENTS: '{instruction[:80]}...'")
+                    print(f"    Matched pattern: {matched_pattern}")
                 
                 # Clean up the instruction to make it more ingredient-like
                 clean_ingredient = instruction
@@ -1257,13 +1187,15 @@ class EvernoteToNextcloudConverter:
                 
                 new_ingredients.append(clean_ingredient)
                 moved_count += 1
-                print(f"    CLEANED TO: '{clean_ingredient}'")
+                if self.debug:
+                    print(f"    CLEANED TO: '{clean_ingredient}'")
             else:
                 new_instructions.append(instruction)
         
-        print(f"  MOVED {moved_count} items from instructions to ingredients")
-        print(f"~ END POST-PROCESSING - {recipe_title}")
-        print(f"{'~'*80}")
+        if self.debug:
+            print(f"  MOVED {moved_count} items from instructions to ingredients")
+            print(f"~ END POST-PROCESSING - {recipe_title}")
+            print(f"{'~'*80}")
         
         return new_ingredients, new_instructions
 
@@ -1274,6 +1206,7 @@ def main():
     )
     parser.add_argument('input_dir', help='Directory containing .enex files')
     parser.add_argument('output_file', help='Output zip file path')
+    parser.add_argument('--debug', action='store_true', help='Enable debug output')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
     
     args = parser.parse_args()
@@ -1282,7 +1215,7 @@ def main():
         print(f"Error: Directory '{args.input_dir}' not found")
         return 1
     
-    exporter = EvernoteToNextcloudConverter(args.input_dir, args.output_file)
+    exporter = EvernoteToNextcloudConverter(args.input_dir, args.output_file, debug=args.debug)
     
     try:
         exporter.convert()
