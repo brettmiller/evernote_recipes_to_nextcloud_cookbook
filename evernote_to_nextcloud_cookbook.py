@@ -91,7 +91,7 @@ class EvernoteToNextcloudConverter:
                 return None
                 
             title = title_elem.text or "Untitled Recipe"
-            content = content_elem.text or ""
+            content = content_elem.text if content_elem.text is not None else ""
             created = created_elem.text if created_elem is not None else None
             
             if self.debug:
@@ -133,7 +133,7 @@ class EvernoteToNextcloudConverter:
 
     def create_recipe_data(self, recipe_id: int, name: str, description: str,
                           ingredients: List[str], instructions: List[str], 
-                          created: Optional[str], image_files: List[str] = None, 
+                          created: Optional[str], image_files: Optional[List[str]] = None, 
                           source_url: str = "") -> Dict:
         """Create Nextcloud Recipes JSON-LD format"""
         
@@ -233,7 +233,7 @@ class EvernoteToNextcloudConverter:
         # Get the text content again to extract original instructions with placeholders
         title_elem = note.find('title')
         content_elem = note.find('content')
-        content = content_elem.text if content_elem is not None else ""
+        content = content_elem.text if content_elem is not None and content_elem.text is not None else ""
         
         # Re-parse content to get instructions with image placeholders
         text_content, _ = self.parse_content_and_images(content, note)
@@ -318,14 +318,21 @@ class EvernoteToNextcloudConverter:
                                     break
                         
                         # If still no hash found, create one from the data
-                        if not resource_hash:
+                        if not resource_hash and data_elem.text:
                             resource_hash = hashlib.md5(data_elem.text.encode()).hexdigest()
+                        
+                        # Skip if we still don't have a hash
+                        if not resource_hash:
+                            continue
                         
                         if self.debug:
                             print(f"    Found image with hash: {resource_hash[:8]}...")
                         
                         # Decode base64 image data
-                        image_data = base64.b64decode(data_elem.text)
+                        if data_elem.text:
+                            image_data = base64.b64decode(data_elem.text)
+                        else:
+                            continue  # Skip if no image data
                         
                         # Determine file extension from mime type
                         ext_map = {
