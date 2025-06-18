@@ -32,8 +32,8 @@ import time
 
 
 class EvernoteToNextcloudConverter:
-    def __init__(self, input_dir: str, output_file: str, debug: bool = False):
-        self.input_dir = Path(input_dir)
+    def __init__(self, input_path: str, output_file: str, debug: bool = False):
+        self.input_path = Path(input_path)
         self.output_file = Path(output_file)
         if not self.output_file.suffix:
             self.output_file = self.output_file.with_suffix('.zip')
@@ -47,13 +47,23 @@ class EvernoteToNextcloudConverter:
     def convert(self):
         """Main conversion method"""
         try:
-            enex_files = list(self.input_dir.glob("*.enex"))
-            
-            if not enex_files:
-                print(f"No .enex files found in {self.input_dir}")
-                return
-            
-            print(f"Found {len(enex_files)} .enex files")
+            # Check if input is a single file or directory
+            if self.input_path.is_file():
+                if not self.input_path.suffix.lower() == '.enex':
+                    print(f"Error: File '{self.input_path}' is not a .enex file")
+                    return
+                
+                print(f"Processing single file: {self.input_path.name}")
+                enex_files = [self.input_path]
+            else:
+                # Input is a directory
+                enex_files = list(self.input_path.glob("*.enex"))
+                
+                if not enex_files:
+                    print(f"No .enex files found in {self.input_path}")
+                    return
+                
+                print(f"Found {len(enex_files)} .enex files in directory")
             
             recipe_zips = []
             
@@ -2875,7 +2885,7 @@ def main():
         description='Convert Evernote .enex files to Nextcloud Recipes export format. '
                    'Will attempt to fetch fresh content from source URLs when available.'
     )
-    parser.add_argument('input_dir', help='Directory containing .enex files')
+    parser.add_argument('input_path', help='Directory containing .enex files or path to a single .enex file')
     parser.add_argument('output_file', help='Output zip file path')
     parser.add_argument('--debug', action='store_true', help='Enable debug output')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
@@ -2884,11 +2894,11 @@ def main():
     
     args = parser.parse_args()
     
-    if not os.path.exists(args.input_dir):
-        print(f"Error: Directory '{args.input_dir}' not found")
+    if not os.path.exists(args.input_path):
+        print(f"Error: Path '{args.input_path}' not found")
         return 1
     
-    exporter = EvernoteToNextcloudConverter(args.input_dir, args.output_file, debug=args.debug)
+    exporter = EvernoteToNextcloudConverter(args.input_path, args.output_file, debug=args.debug)
     
     # Set web fetch option - enabled by default, disable only if requested
     if args.no_web_fetch:
