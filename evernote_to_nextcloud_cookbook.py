@@ -511,31 +511,23 @@ class EvernoteToNextcloudConverter:
             # Don't return None here, still try the strategies
         
         # Try multiple strategies in order of preference
-        # Start with general strategies, then use enhanced methods as fallbacks
+        # Start with general strategies, then use enhanced methods as fallbacks for any difficult site
         strategies = [
             self._fetch_with_simple_headers,
             self._fetch_with_curl_headers,
             self._fetch_with_basic_requests,
             self._fetch_with_modern_browser,
             self._fetch_with_minimal_headers,
-            self._fetch_with_requests_session,  # Added ultra-lenient fetch method
+            self._fetch_with_requests_session,  # Ultra-lenient fetch method
             # Enhanced methods as fallbacks for difficult sites
             self._fetch_with_chrome_headers,
             self._fetch_with_safari_headers,
+            # Additional strategies for very stubborn sites
+            self._fetch_with_firefox_headers,
+            self._fetch_with_edge_headers,
+            self._fetch_with_extended_timeout,  # Longer timeouts and delays
+            self._fetch_with_no_ssl_verification,  # Last resort for SSL issues
         ]
-        
-        # Special handling for ediblecommunities.com sites
-        if 'ediblecommunities.com' in clean_url.lower():
-            if self.debug:
-                print(f"    Detected ediblecommunities.com site - using specialized strategies")
-            # Try specialized strategies first for this site
-            specialized_strategies = [
-                self._fetch_edible_communities_site,
-                self._fetch_edible_nashville_specific,  # Added ultra-specific method
-                self._fetch_with_firefox_headers,
-                self._fetch_with_edge_headers,
-            ]
-            strategies = specialized_strategies + strategies
         
         for i, strategy in enumerate(strategies, 1):
             if self.debug:
@@ -688,8 +680,56 @@ class EvernoteToNextcloudConverter:
         # For other sites, use normal processing
         return self._process_response(response)
 
-    def _fetch_edible_nashville_specific(self, url: str) -> Optional[str]:
-        """Ultra-specific fetch method for ediblenashville.ediblecommunities.com"""
+    def _fetch_with_extended_timeout(self, url: str) -> Optional[str]:
+        """Fetch with extended timeouts and delays for very slow/stubborn sites"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Referer': 'https://www.google.com/',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+        }
+        
+        session = None
+        try:
+            session = requests.Session()
+            session.headers.update(headers)
+            session.verify = False  # Disable SSL for stubborn sites
+            
+            if self.debug:
+                print(f"      Making extended timeout request to: {url}")
+            
+            # Add extended delay for very slow sites
+            time.sleep(5)
+            
+            response = session.get(url, timeout=60, allow_redirects=True)
+            
+            if self.debug:
+                print(f"      Got response: {response.status_code}")
+                print(f"      Content length: {len(response.text)}")
+            
+            # Be very lenient with status codes
+            if response.status_code in [200, 301, 302, 304, 403, 429] and len(response.text) > 100:
+                return self._process_response_lenient(response)
+            else:
+                response.raise_for_status()
+                return self._process_response_lenient(response)
+                
+        except Exception as e:
+            if self.debug:
+                print(f"      Extended timeout - ERROR: {type(e).__name__}: {e}")
+            raise
+        finally:
+            if session:
+                session.close()
+    
+    def _fetch_with_no_ssl_verification(self, url: str) -> Optional[str]:
+        """Last resort fetch with no SSL verification and very permissive settings"""
         headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
@@ -710,15 +750,15 @@ class EvernoteToNextcloudConverter:
         try:
             session = requests.Session()
             session.headers.update(headers)
-            session.verify = True  # Try SSL first for this site
+            session.verify = False  # No SSL verification at all
             
             if self.debug:
-                print(f"      Making Nashville Edible specific request to: {url}")
+                print(f"      Making no-SSL request to: {url}")
             
-            # Longer delay for this specific site
-            time.sleep(5)
+            # Extended delay and timeout for last resort
+            time.sleep(7)
             
-            response = session.get(url, timeout=45, allow_redirects=True)
+            response = session.get(url, timeout=90, allow_redirects=True)
             
             if self.debug:
                 print(f"      Got response: {response.status_code}")
@@ -726,7 +766,7 @@ class EvernoteToNextcloudConverter:
                 print(f"      Headers: {dict(list(response.headers.items())[:5])}")
             
             # Accept any response that has substantial content
-            if response.status_code in [200, 301, 302, 304, 403, 429] and len(response.text) > 100:
+            if response.status_code in [200, 301, 302, 304, 403, 429, 500, 503] and len(response.text) > 100:
                 return self._process_response_lenient(response)
             else:
                 if self.debug:
@@ -734,30 +774,9 @@ class EvernoteToNextcloudConverter:
                 response.raise_for_status()
                 return self._process_response_lenient(response)
                 
-        except requests.exceptions.SSLError as e:
-            if self.debug:
-                print(f"      Nashville Edible - SSL ERROR: {e}")
-                print(f"      Retrying without SSL verification...")
-            # Try without SSL verification
-            try:
-                if session:
-                    session.verify = False
-                    response = session.get(url, timeout=45, allow_redirects=True)
-                    if self.debug:
-                        print(f"      Got response (no SSL): {response.status_code}")
-                    
-                    if response.status_code in [200, 301, 302, 304, 403, 429] and len(response.text) > 100:
-                        return self._process_response_lenient(response)
-                    else:
-                        response.raise_for_status()
-                        return self._process_response_lenient(response)
-            except Exception as e2:
-                if self.debug:
-                    print(f"      Nashville Edible - SSL fallback failed: {e2}")
-                raise e
         except Exception as e:
             if self.debug:
-                print(f"      Nashville Edible - ERROR: {type(e).__name__}: {e}")
+                print(f"      No SSL verification - ERROR: {type(e).__name__}: {e}")
             raise
         finally:
             if session:
@@ -1349,8 +1368,8 @@ class EvernoteToNextcloudConverter:
             if session:
                 session.close()
 
-    def _fetch_edible_communities_site(self, url: str) -> Optional[str]:
-        """Specialized fetch for ediblecommunities.com sites which can be very strict"""
+    def _fetch_with_extended_timeout(self, url: str) -> Optional[str]:
+        """Fetch with extended timeouts and delays for very slow/stubborn sites"""
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -1368,23 +1387,22 @@ class EvernoteToNextcloudConverter:
         try:
             session = requests.Session()
             session.headers.update(headers)
-            session.verify = False  # Some edible sites have SSL issues
+            session.verify = False  # Disable SSL for stubborn sites
             
             if self.debug:
-                print(f"      Making edible communities request to: {url}")
+                print(f"      Making extended timeout request to: {url}")
             
-            # Add longer delay for this site
-            time.sleep(3)
+            # Add extended delay for very slow sites
+            time.sleep(5)
             
-            response = session.get(url, timeout=30, allow_redirects=True)
+            response = session.get(url, timeout=60, allow_redirects=True)
             
             if self.debug:
                 print(f"      Got response: {response.status_code}")
                 print(f"      Content length: {len(response.text)}")
             
-            # Be more lenient with status codes for this site
-            if response.status_code in [200, 301, 302, 304, 403]:
-                # Try to process even 403 responses as they might have content
+            # Be very lenient with status codes
+            if response.status_code in [200, 301, 302, 304, 403, 429] and len(response.text) > 100:
                 return self._process_response_lenient(response)
             else:
                 response.raise_for_status()
@@ -1392,12 +1410,66 @@ class EvernoteToNextcloudConverter:
                 
         except Exception as e:
             if self.debug:
-                print(f"      Edible communities - ERROR: {type(e).__name__}: {e}")
+                print(f"      Extended timeout - ERROR: {type(e).__name__}: {e}")
             raise
         finally:
             if session:
                 session.close()
     
+    def _fetch_with_no_ssl_verification(self, url: str) -> Optional[str]:
+        """Last resort fetch with no SSL verification and very permissive settings"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+            'Referer': 'https://www.google.com/',
+        }
+        
+        session = None
+        try:
+            session = requests.Session()
+            session.headers.update(headers)
+            session.verify = False  # No SSL verification at all
+            
+            if self.debug:
+                print(f"      Making no-SSL request to: {url}")
+            
+            # Extended delay and timeout for last resort
+            time.sleep(7)
+            
+            response = session.get(url, timeout=90, allow_redirects=True)
+            
+            if self.debug:
+                print(f"      Got response: {response.status_code}")
+                print(f"      Content length: {len(response.text)}")
+                print(f"      Headers: {dict(list(response.headers.items())[:5])}")
+            
+            # Accept any response that has substantial content
+            if response.status_code in [200, 301, 302, 304, 403, 429, 500, 503] and len(response.text) > 100:
+                return self._process_response_lenient(response)
+            else:
+                if self.debug:
+                    print(f"      Unexpected status or empty response")
+                response.raise_for_status()
+                return self._process_response_lenient(response)
+                
+        except Exception as e:
+            if self.debug:
+                print(f"      No SSL verification - ERROR: {type(e).__name__}: {e}")
+            raise
+        finally:
+            if session:
+                session.close()
+
     def _fetch_with_firefox_headers(self, url: str) -> Optional[str]:
         """Fetch with Firefox-specific headers"""
         headers = {
