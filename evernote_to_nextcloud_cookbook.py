@@ -171,8 +171,42 @@ class EvernoteToNextcloudConverter:
                                     print(f"    SUCCESS: Found JSON-LD on retry - using structured data")
                                 return self.create_recipe_from_json_ld(recipe_data_retry, title, note)
                     
-                    images = []  # Web content won't have embedded images
-                    processing_method = "HTML parsing (web content)"
+                    # Validate HTML parsing results before proceeding
+                    if text_content:
+                        # Test extract ingredients and instructions to see if we got useful content
+                        test_ingredients = self.extract_ingredients(text_content, title)
+                        test_instructions = self.extract_instructions(text_content, title)
+                        
+                        # Enhanced validation: check if the web content is actually recipe-related
+                        is_valid_recipe_content = self.validate_web_recipe_content(web_content, title, source_url)
+                        
+                        # If HTML parsing failed to extract meaningful recipe content, fall back to Evernote
+                        if (len(test_ingredients) == 0 or len(test_instructions) == 0 or not is_valid_recipe_content):
+                            if self.debug:
+                                validation_reason = []
+                                if len(test_ingredients) == 0:
+                                    validation_reason.append("no ingredients")
+                                if len(test_instructions) == 0:
+                                    validation_reason.append("no instructions")
+                                if not is_valid_recipe_content:
+                                    validation_reason.append("content not recipe-related")
+                                print(f"    HTML parsing failed validation ({', '.join(validation_reason)})")
+                                print(f"    Discarding web content and falling back to Evernote content")
+                            
+                            # CRITICAL: Completely discard contaminated web content
+                            web_content = None  # Clear the web content so it doesn't contaminate later processing
+                            text_content, images = self.parse_content_and_images(content, note)
+                            processing_method = "Evernote content (HTML parsing failed)"
+                        else:
+                            if self.debug:
+                                print(f"    HTML parsing successful (ingredients={len(test_ingredients)}, instructions={len(test_instructions)})")
+                            images = []  # Web content won't have embedded images
+                            processing_method = "HTML parsing (web content)"
+                    else:
+                        if self.debug:
+                            print(f"    HTML parsing returned no content, falling back to Evernote")
+                        text_content, images = self.parse_content_and_images(content, note)
+                        processing_method = "Evernote content (HTML parsing failed)"
                 else:
                     if self.debug:
                         print(f"    Failed to fetch web content, using Evernote content")
@@ -202,6 +236,48 @@ class EvernoteToNextcloudConverter:
             
             # Post-process instructions to move misclassified ingredients back to ingredients list
             final_ingredients, final_instructions = self.post_process_ingredients_from_instructions(ingredients, instructions, title)
+            
+            # Fallback: If no ingredients found, put entire note content as first instruction
+            if len(final_ingredients) == 0:
+                if self.debug:
+                    print(f"    No ingredients extracted - adding full note content as instruction fallback")
+                    print(f"    Processing method was: {processing_method}")
+                    print(f"    Content length: {len(content) if content else 0}")
+                
+                # Always get the raw Evernote content for fallback, regardless of processing method
+                if content:
+                    fallback_content = self.parse_content(content)
+                    if self.debug:
+                        print(f"    Parsed fallback content length: {len(fallback_content) if fallback_content else 0}")
+                    
+                    if fallback_content and len(fallback_content.strip()) > 10:
+                        # Clean up the content for instruction use
+                        clean_fallback = fallback_content.strip()
+                        # Remove any URLs that might be in the content
+                        clean_fallback = re.sub(r'https?://[^\s<>"\']+', '', clean_fallback)
+                        # Clean up extra whitespace
+                        clean_fallback = re.sub(r'\n\s*\n', '\n\n', clean_fallback)
+                        clean_fallback = re.sub(r'[ \t]+', ' ', clean_fallback)
+                        
+                        if clean_fallback and len(clean_fallback.strip()) > 10:
+                            # Add as the first instruction
+                            fallback_instruction = f"Recipe content from Evernote note:\n\n{clean_fallback}"
+                            final_instructions = [fallback_instruction] + final_instructions
+                            
+                            if self.debug:
+                                print(f"    Added fallback instruction ({len(clean_fallback)} chars)")
+                                print(f"    Final instructions count: {len(final_instructions)}")
+                        else:
+                            if self.debug:
+                                print(f"    Clean fallback too short: '{clean_fallback[:100]}...'")
+                    else:
+                        if self.debug:
+                            print(f"    Fallback content too short or empty")
+                else:
+                    if self.debug:
+                        print(f"    No content available for fallback")
+            elif self.debug:
+                print(f"    Ingredients found ({len(final_ingredients)}), no fallback needed")
             
             if self.debug:
                 print(f"\n{'='*80}")
@@ -401,17 +477,23 @@ class EvernoteToNextcloudConverter:
         
         # Update recipe data with actual image filenames and regenerate instructions
         # Get the text content again to extract original instructions with placeholders
-        if web_content:
-            # If we used web content, we need to extract clean text from it for instruction parsing
-            if processing_method == "HTML parsing (web content)":
-                # For HTML parsing, we need to convert HTML to text first
-                clean_web_text = self.extract_recipe_from_html(web_content)
-                if not clean_web_text:
-                    clean_web_text = self.html_to_text(web_content)
-                original_instructions = self.extract_instructions(clean_web_text, recipe_data["name"])
-            else:
-                # For JSON-LD processing, this shouldn't happen, but handle it gracefully
-                original_instructions = self.extract_instructions(web_content, recipe_data["name"])
+        if web_content and processing_method == "HTML parsing (web content)":
+            # Only use web content if we're actually using HTML parsing method
+            # For HTML parsing, we need to convert HTML to text first
+            clean_web_text = self.extract_recipe_from_html(web_content)
+            if not clean_web_text:
+                clean_web_text = self.html_to_text(web_content)
+            original_instructions = self.extract_instructions(clean_web_text, recipe_data["name"])
+        elif web_content and processing_method != "HTML parsing (web content)":
+            # If we have web_content but we're not using it (fallback happened), ignore it completely
+            if self.debug:
+                print(f"    Ignoring web content due to processing method: {processing_method}")
+            # Re-parse Evernote content to get instructions with image placeholders
+            title_elem = note.find('title')
+            content_elem = note.find('content')
+            content = content_elem.text if content_elem is not None and content_elem.text is not None else ""
+            text_content, _ = self.parse_content_and_images(content, note)
+            original_instructions = self.extract_instructions(text_content, recipe_data["name"])
         else:
             # For Evernote content, re-parse to get instructions with image placeholders
             title_elem = note.find('title')
@@ -1460,6 +1542,160 @@ class EvernoteToNextcloudConverter:
             return text_content
         
         return None
+
+    def validate_web_recipe_content(self, web_content: str, recipe_title: str, source_url: str) -> bool:
+        """Validate that web content is actually recipe-related and not a homepage redirect"""
+        if not web_content:
+            return False
+        
+        try:
+            # Convert to text for analysis
+            text_content = self.html_to_text(web_content)
+            
+            if self.debug:
+                print(f"    Validating web content for recipe relevance...")
+            
+            # Check 1: Look for obvious homepage/redirect indicators
+            homepage_indicators = [
+                'welcome to our site', 'browse our recipes', 'recent posts', 'latest recipes',
+                'recipe categories', 'search recipes', 'popular recipes', 'featured recipes',
+                'about us', 'contact us', 'newsletter signup', 'follow us on',
+                'page not found', '404', 'sorry, the page', 'page cannot be found',
+                'home page', 'main menu', 'navigation', 'site map',
+                'all recipes', 'recipe index', 'browse by category'
+            ]
+            
+            text_lower = text_content.lower()
+            homepage_count = 0
+            for indicator in homepage_indicators:
+                if indicator in text_lower:
+                    homepage_count += 1
+                    if self.debug:
+                        print(f"      Found homepage indicator: '{indicator}'")
+            
+            # If we find too many homepage indicators, it's likely not a recipe page
+            if homepage_count >= 3:
+                if self.debug:
+                    print(f"      FAILED: Too many homepage indicators ({homepage_count})")
+                return False
+            
+            # Check 2: Recipe-specific validation
+            # Look for recipe measurements (strong positive indicator)
+            measurement_patterns = [
+                r'\d+\s*(cups?|tablespoons?|teaspoons?|pounds?|ounces?|grams?)',
+                r'\d+/\d+\s*(cups?|tablespoons?|teaspoons?)',
+                r'[¼½¾⅓⅔⅛⅜⅝⅞]\s*(cups?|tablespoons?|teaspoons?)',
+                r'\d+\s*(tbsp|tsp|oz|lb|g|kg|ml|l)\b'
+            ]
+            
+            measurement_count = 0
+            for pattern in measurement_patterns:
+                matches = re.findall(pattern, text_lower, re.IGNORECASE)
+                measurement_count += len(matches)
+            
+            if self.debug:
+                print(f"      Measurement count: {measurement_count}")
+            
+            # Check 3: Recipe title relevance
+            title_relevance = 0
+            title_words = []
+            if recipe_title:
+                # Extract meaningful words from the recipe title (ignore common words)
+                common_words = {'recipe', 'the', 'a', 'an', 'and', 'or', 'with', 'for', 'in', 'on', 'at', 'to', 'from'}
+                clean_title = re.sub(r'[^\w\s]', '', recipe_title.lower())
+                for word in clean_title.split():
+                    if len(word) > 2 and word not in common_words:
+                        title_words.append(word)
+                
+                # Check if title words appear in the content
+                for word in title_words:
+                    if word in text_lower:
+                        title_relevance += 1
+                        if self.debug:
+                            print(f"      Found title word '{word}' in content")
+            
+            if self.debug:
+                print(f"      Title relevance: {title_relevance}/{len(title_words)}")
+            
+            # Check 4: Cooking action words
+            cooking_actions = [
+                'bake', 'cook', 'heat', 'mix', 'stir', 'add', 'pour', 'combine',
+                'blend', 'whisk', 'fold', 'beat', 'chop', 'dice', 'slice',
+                'preheat', 'serve', 'garnish', 'season', 'simmer', 'boil'
+            ]
+            
+            cooking_action_count = 0
+            for action in cooking_actions:
+                cooking_action_count += len(re.findall(r'\b' + re.escape(action) + r'\b', text_lower))
+            
+            if self.debug:
+                print(f"      Cooking action count: {cooking_action_count}")
+            
+            # Check 5: Content length and structure
+            content_length = len(text_lower.strip())
+            line_count = len([line for line in text_lower.split('\n') if line.strip()])
+            
+            if self.debug:
+                print(f"      Content length: {content_length}, Lines: {line_count}")
+            
+            # Decision logic: Content is valid if it has recipe characteristics
+            validation_score = 0
+            
+            # Positive indicators
+            if measurement_count >= 3:
+                validation_score += 3
+            elif measurement_count >= 1:
+                validation_score += 1
+            
+            if cooking_action_count >= 5:
+                validation_score += 2
+            elif cooking_action_count >= 2:
+                validation_score += 1
+            
+            if title_relevance >= 2:
+                validation_score += 2
+            elif title_relevance >= 1:
+                validation_score += 1
+            
+            if content_length > 500 and line_count > 10:
+                validation_score += 1
+            
+            # Negative indicators
+            if homepage_count >= 2:
+                validation_score -= 2
+            
+            if content_length < 200:
+                validation_score -= 2
+            
+            # Very short content is suspicious
+            if content_length < 100:
+                validation_score -= 3
+            
+            # Check for URL mismatch (if URL suggests recipe but content doesn't)
+            url_suggests_recipe = False
+            if source_url:
+                url_lower = source_url.lower()
+                if any(word in url_lower for word in ['recipe', 'food', 'cooking', 'kitchen']):
+                    url_suggests_recipe = True
+                    if validation_score <= 0:
+                        validation_score -= 1  # Penalty for URL/content mismatch
+            
+            if self.debug:
+                print(f"      Final validation score: {validation_score}")
+                print(f"      URL suggests recipe: {url_suggests_recipe}")
+            
+            # Content is valid if it scores positively
+            is_valid = validation_score >= 2
+            
+            if self.debug:
+                print(f"      Web content validation: {'PASSED' if is_valid else 'FAILED'}")
+            
+            return is_valid
+            
+        except Exception as e:
+            if self.debug:
+                print(f"      Error validating web content: {e}")
+            return False
 
     def parse_content(self, content: str) -> str:
         """Parse ENML to plain text"""
