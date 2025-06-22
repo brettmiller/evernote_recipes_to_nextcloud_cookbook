@@ -127,8 +127,8 @@ class EvernoteToNextcloudConverter:
                 print(f"PROCESSING RECIPE: {title}")
                 print(f"{'='*80}")
             
-            # First, try to extract source URL from content
-            source_url = self.extract_source_url(content, title)
+            # First, try to extract source URL from content and note attributes
+            source_url = self.extract_source_url(content, title, note)
             
             # Try to fetch fresh content from URL with JSON-LD priority
             web_content = None
@@ -1494,16 +1494,49 @@ class EvernoteToNextcloudConverter:
         
         return content.strip()
 
-    def extract_source_url(self, content: str, recipe_title: str = "") -> str:
-        """Extract potential recipe source URL from content"""
+    def extract_source_url(self, content: str, recipe_title: str = "", note: Optional[ET.Element] = None) -> str:
+        """Extract potential recipe source URL from content and note attributes"""
+        if self.debug:
+            if content:
+                print(f"    Processing content length: {len(content)}")
+                print(f"    Content preview: {content[:200]}...")
+            else:
+                print(f"    No content provided")
+        
+        # HIGHEST PRIORITY: Check note attributes for source-url first
+        if note is not None:
+            note_attributes = note.find('note-attributes')
+            if note_attributes is not None:
+                source_url_elem = note_attributes.find('source-url')
+                if source_url_elem is not None and source_url_elem.text:
+                    source_url = source_url_elem.text.strip()
+                    if self.debug:
+                        print(f"    Found source-url in note-attributes: {source_url}")
+                    
+                    # Clean the source URL from note attributes
+                    original_url = source_url
+                    while source_url.endswith(';') or source_url.endswith('/'):
+                        if source_url.endswith(';'):
+                            source_url = source_url[:-1]  # Remove trailing semicolon
+                        if source_url.endswith('/'):
+                            source_url = source_url[:-1]  # Remove trailing slash
+                    
+                    if self.debug and original_url != source_url:
+                        print(f"    Cleaned note-attributes source URL: '{original_url}' -> '{source_url}'")
+                    
+                    # Validate it's a proper HTTP URL before returning
+                    if source_url.startswith(('http://', 'https://')):
+                        if self.debug:
+                            print(f"    Using note-attributes source-url as highest priority")
+                        return source_url
+                    else:
+                        if self.debug:
+                            print(f"    Note-attributes source-url is not a valid HTTP URL, continuing to other methods")
+        
         if not content:
             return ""
         
-        if self.debug:
-            print(f"    Processing content length: {len(content)}")
-            print(f"    Content preview: {content[:200]}...")
-        
-        # PRIORITY 1: Look for explicit source URL tags first
+        # PRIORITY 2: Look for explicit source URL tags in content
         source_url_patterns = [
             r'<source-url>\s*(https?://[^<>"\']+)\s*</source-url>',  # <source-url>...</source-url>
             r'--en-clipped-source-url:\s*(https?://[^\s<>"\']+)'     # Evernote clipped URLs
@@ -1513,7 +1546,7 @@ class EvernoteToNextcloudConverter:
             matches = re.findall(pattern, content, re.IGNORECASE)
             if matches:
                 if self.debug:
-                    print(f"    Found explicit source URL(s): {matches}")
+                    print(f"    Found explicit source URL(s) in content: {matches}")
                 # Clean the explicit source URL too
                 explicit_url = matches[0]
                 original_url = explicit_url
