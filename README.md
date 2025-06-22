@@ -1,4 +1,4 @@
-The script parses a directory of Evernote .enex export files that contain recipes and properly converts them to a Nextcloud Cookbook zip archive. That archive can be imported into several other Cookbook webapps, including Mealie which is what it was tested with and originally written for.
+The script parses an Evernote .enex file or directory containing one or more Evernote .enex export files that contain recipes and properly converts them to a Nextcloud Cookbook zip archive. That archive can be imported into several other Cookbook webapps, including Mealie which is what it was tested with and originally written for.
 
 ## Features
 
