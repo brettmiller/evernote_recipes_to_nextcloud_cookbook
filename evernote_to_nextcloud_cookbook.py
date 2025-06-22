@@ -148,6 +148,21 @@ class EvernoteToNextcloudConverter:
                     if not text_content:
                         # If HTML extraction failed, try basic HTML-to-text conversion
                         text_content = self.html_to_text(web_content)
+                    
+                    # IMPORTANT: Check if HTML parsing found JSON-LD that we missed in the first pass
+                    # This can happen with sites that have complex JSON-LD that needs special handling
+                    if text_content and text_content.startswith("# "):  # Looks like structured recipe text from JSON-LD
+                        if self.debug:
+                            print(f"    HTML parsing found structured data that looks like JSON-LD - re-checking for JSON-LD")
+                        # Try JSON-LD extraction again with more lenient parsing
+                        json_ld_recipe_retry = self.extract_structured_recipe_data(web_content)
+                        if json_ld_recipe_retry:
+                            recipe_data_retry = self.validate_and_use_json_ld_recipe(json_ld_recipe_retry, title, created, source_url)
+                            if recipe_data_retry:
+                                if self.debug:
+                                    print(f"    SUCCESS: Found JSON-LD on retry - using structured data")
+                                return self.create_recipe_from_json_ld(recipe_data_retry, title, note)
+                    
                     images = []  # Web content won't have embedded images
                     processing_method = "HTML parsing (web content)"
                 else:
@@ -2372,42 +2387,124 @@ class EvernoteToNextcloudConverter:
 
     def extract_structured_recipe_data(self, html_content: str) -> Optional[dict]:
         """Extract JSON-LD Recipe data from HTML and return as dict, or None if not found."""
+        # Try multiple JSON-LD patterns with different approaches
         json_ld_patterns = [
+            # Standard patterns
             r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
             r'<script[^>]*type=["\']application/ld\+json["\']>(.*?)</script>',
+            # More lenient patterns for sites with unusual formatting
+            r'<script[^>]*type\s*=\s*["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+            r'<script[^>]*type\s*=\s*["\']application/ld\+json["\']>(.*?)</script>',
+            # Even more permissive for edge cases
+            r'<script[^>]*type=[^>]*ld\+json[^>]*>(.*?)</script>',
         ]
         
         for pattern in json_ld_patterns:
             matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
             for match in matches:
+                clean_json = ""
                 try:
-                    # Clean up the JSON (remove comments)
-                    clean_json = re.sub(r'//.*?\n', '', match)
+                    if self.debug:
+                        print(f"    Trying to parse JSON-LD block: {match[:100]}...")
+                    
+                    # Clean up the JSON more aggressively for difficult sites
+                    clean_json = match.strip()
+                    
+                    # Remove HTML comments
+                    clean_json = re.sub(r'<!--.*?-->', '', clean_json, flags=re.DOTALL)
+                    
+                    # Remove JavaScript comments
+                    clean_json = re.sub(r'//.*?\n', '', clean_json)
                     clean_json = re.sub(r'/\*.*?\*/', '', clean_json, flags=re.DOTALL)
                     
-                    json_data = json.loads(clean_json)
+                    # Remove any leading/trailing whitespace and newlines
+                    clean_json = clean_json.strip()
                     
-                    # Handle both dict and list
-                    items = json_data if isinstance(json_data, list) else [json_data]
+                    # Try to handle cases where there might be multiple JSON objects
+                    # by trying to parse each potential JSON block
+                    if clean_json.startswith('[') or clean_json.startswith('{'):
+                        json_data = json.loads(clean_json)
+                        
+                        # Handle both dict and list
+                        items = json_data if isinstance(json_data, list) else [json_data]
+                        
+                        for item in items:
+                            recipe = self._extract_recipe_from_json_item(item)
+                            if recipe:
+                                if self.debug:
+                                    print(f"    Successfully found Recipe in JSON-LD!")
+                                return recipe
                     
-                    for item in items:
-                        # Check direct @type
-                        if item.get('@type') == 'Recipe':
-                            return item
-                        # Check if @type is a list containing 'Recipe'
-                        if isinstance(item.get('@type'), list) and 'Recipe' in item.get('@type'):
-                            return item
-                        # Check @graph
-                        if '@graph' in item:
-                            for graph_item in item['@graph']:
-                                if isinstance(graph_item, dict):
-                                    gtype = graph_item.get('@type')
-                                    if gtype == 'Recipe' or (isinstance(gtype, list) and 'Recipe' in gtype):
-                                        return graph_item
-                except Exception:
+                except json.JSONDecodeError as e:
+                    if self.debug:
+                        print(f"    JSON parsing failed: {e}")
+                    # Try to fix common JSON issues if we have valid JSON content
+                    if clean_json:
+                        try:
+                            # Sometimes there are trailing commas or other issues
+                            fixed_json = self._attempt_json_fix(clean_json)
+                            if fixed_json:
+                                json_data = json.loads(fixed_json)
+                                items = json_data if isinstance(json_data, list) else [json_data]
+                                for item in items:
+                                    recipe = self._extract_recipe_from_json_item(item)
+                                    if recipe:
+                                        if self.debug:
+                                            print(f"    Successfully found Recipe in fixed JSON-LD!")
+                                        return recipe
+                        except Exception as e2:
+                            if self.debug:
+                                print(f"    JSON fix attempt also failed: {e2}")
+                            continue
+                except Exception as e:
+                    if self.debug:
+                        print(f"    General error parsing JSON-LD: {e}")
                     continue
         
+        if self.debug:
+            print(f"    No valid JSON-LD Recipe found after trying all patterns")
         return None
+
+    def _extract_recipe_from_json_item(self, item: dict) -> Optional[dict]:
+        """Extract Recipe from a single JSON-LD item"""
+        if not isinstance(item, dict):
+            return None
+            
+        # Check direct @type
+        if item.get('@type') == 'Recipe':
+            return item
+        
+        # Check if @type is a list containing 'Recipe'
+        item_type = item.get('@type')
+        if isinstance(item_type, list) and 'Recipe' in item_type:
+            return item
+        
+        # Check @graph property (common in some implementations)
+        if '@graph' in item:
+            graph_items = item['@graph']
+            if isinstance(graph_items, list):
+                for graph_item in graph_items:
+                    if isinstance(graph_item, dict):
+                        graph_type = graph_item.get('@type')
+                        if graph_type == 'Recipe' or (isinstance(graph_type, list) and 'Recipe' in graph_type):
+                            return graph_item
+        
+        return None
+
+    def _attempt_json_fix(self, json_str: str) -> Optional[str]:
+        """Attempt to fix common JSON formatting issues"""
+        try:
+            # Remove trailing commas before closing brackets/braces
+            fixed = re.sub(r',(\s*[}\]])', r'\1', json_str)
+            
+            # Try to handle unescaped quotes in strings (basic attempt)
+            # This is a simple fix and might not work for all cases
+            
+            # Validate the fix by attempting to parse
+            json.loads(fixed)
+            return fixed
+        except:
+            return None
 
     def validate_and_use_json_ld_recipe(self, json_ld_recipe: dict, recipe_title: str, created: Optional[str] = None, source_url: str = "") -> Optional[Dict]:
         """Validate JSON-LD Recipe data and use directly if valid, with minimal cleanup"""
@@ -2633,6 +2730,25 @@ def test_url_fetch(url: str, debug: bool = True):
     if result:
         print(f"Success! Retrieved {len(result)} characters")
         print(f"Preview: {result[:200]}...")
+        
+        # Test JSON-LD extraction specifically
+        print("\n--- Testing JSON-LD extraction ---")
+        json_ld_result = converter.extract_structured_recipe_data(result)
+        if json_ld_result:
+            print(f"Found JSON-LD recipe: {json_ld_result.get('name', 'Unknown')}")
+            print(f"Ingredients: {len(json_ld_result.get('recipeIngredient', []))}")
+            print(f"Instructions: {len(json_ld_result.get('recipeInstructions', []))}")
+        else:
+            print("No JSON-LD recipe found")
+            
+        # Test HTML extraction as fallback
+        print("\n--- Testing HTML extraction ---")
+        html_result = converter.extract_recipe_from_html(result)
+        if html_result:
+            print(f"HTML extraction succeeded: {len(html_result)} characters")
+            print(f"Preview: {html_result[:200]}...")
+        else:
+            print("HTML extraction failed")
     else:
         print("Failed to retrieve content")
 
