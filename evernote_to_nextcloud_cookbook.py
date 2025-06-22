@@ -33,8 +33,10 @@ import time
 
 class EvernoteToNextcloudConverter:
     def __init__(self, input_path: str, output_file: str, debug: bool = False, 
-                 additional_tags: Optional[List[str]] = None, 
-                 override_tags: Optional[List[str]] = None):
+        additional_tags: Optional[List[str]] = None, 
+        override_tags: Optional[List[str]] = None,
+        additional_categories: Optional[List[str]] = None,
+        override_categories: Optional[List[str]] = None):
         self.input_path = Path(input_path)
         self.output_file = Path(output_file)
         if not self.output_file.suffix:
@@ -47,6 +49,8 @@ class EvernoteToNextcloudConverter:
         self.enable_web_fetch = True  # Enabled by default, try curl-like approach first
         self.additional_tags = additional_tags or []
         self.override_tags = override_tags
+        self.additional_categories = additional_categories or []
+        self.override_categories = override_categories
 
     def convert(self):
         """Main conversion method"""
@@ -310,6 +314,20 @@ class EvernoteToNextcloudConverter:
             if self.additional_tags:
                 final_keywords.extend(self.additional_tags)
         
+        # Process categories
+        final_category = "Imported"  # Default only for Evernote-only recipes
+        
+        # Apply category logic
+        if self.override_categories:
+            # Override completely with new categories (join with comma)
+            final_category = ', '.join(self.override_categories)
+        elif self.additional_categories:
+            # Only add additional categories if specified, starting with default
+            final_categories = ["Imported"]
+            final_categories.extend(self.additional_categories)
+            final_category = ', '.join(final_categories)
+        # If neither override nor additional categories are specified, use default "Imported"
+        
         # Create Nextcloud Recipes format using Recipe schema.org structure
         recipe = {
             "@context": "https://schema.org",
@@ -321,7 +339,7 @@ class EvernoteToNextcloudConverter:
             "prepTime": "PT15M",
             "cookTime": "PT30M", 
             "totalTime": "PT45M",
-            "recipeCategory": "Imported",
+            "recipeCategory": final_category,
             "recipeCuisine": "",
             "keywords": ", ".join(final_keywords),
             "recipeIngredient": [ingredient.strip() for ingredient in ingredients if ingredient.strip()],
@@ -2084,8 +2102,8 @@ class EvernoteToNextcloudConverter:
         
         # Check if line contains measurements (strong indicator of ingredient)
         has_measurement = any(re.search(r'^\s*\d+.*?\b' + re.escape(measure) + r'\b', line_lower) or
-                             re.search(r'^\s*[¼½¾⅓⅔⅛⅜⅝⅞].*?\b' + re.escape(measure) + r'\b', line_lower)
-                             for measure in measurements)
+          re.search(r'^\s*[¼½¾⅓⅔⅛⅜⅝⅞].*?\b' + re.escape(measure) + r'\b', line_lower)
+          for measure in measurements)
         
         # Check for fraction patterns (1/2, 3/4, etc.) - must be at start of line
         has_fraction = re.search(r'^\s*\d+/\d+', line)
@@ -2614,6 +2632,31 @@ class EvernoteToNextcloudConverter:
             # Update keywords in recipe
             recipe['keywords'] = ', '.join(final_keywords)
             
+            # Apply category logic to JSON-LD recipes
+            existing_categories = []
+            
+            # Parse existing categories if they exist
+            if recipe.get('recipeCategory'):
+                if isinstance(recipe['recipeCategory'], str):
+                    existing_categories = [c.strip() for c in recipe['recipeCategory'].split(',') if c.strip()]
+                elif isinstance(recipe['recipeCategory'], list):
+                    existing_categories = [str(c).strip() for c in recipe['recipeCategory'] if str(c).strip()]
+            
+            # Apply category logic
+            if self.override_categories:
+                # Override completely with new categories
+                final_categories = self.override_categories
+                recipe['recipeCategory'] = ', '.join(final_categories)
+            elif self.additional_categories:
+                # Add additional categories to existing ones
+                final_categories_list = existing_categories.copy()  # Start with existing
+                # Add additional categories (avoid duplicates, case-insensitive)
+                for category in self.additional_categories:
+                    if category.lower() not in [c.lower() for c in final_categories_list]:
+                        final_categories_list.append(category)
+                recipe['recipeCategory'] = ', '.join(final_categories_list)
+            # If neither override nor additional categories are specified, leave existing categories unchanged
+            
             # Only add metadata if it's missing (don't override good existing data)
             if not recipe.get("dateCreated") and created:
                 recipe["dateCreated"] = self.format_datetime(created)
@@ -2950,43 +2993,60 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s recipes.enex                              # Convert single file
-  %(prog)s ~/Downloads/evernote_exports/             # Convert all .enex files in directory
-  %(prog)s recipes.enex --tags "vegetarian,quick"    # Add custom tags
-  %(prog)s recipes.enex -T "vegan,healthy"           # Override default tags completely
-  %(prog)s recipes.enex --debug                      # Enable debug output
-  %(prog)s --test-url "https://example.com/recipe"   # Test URL fetching
+  %(prog)s recipes.enex                                    Convert single file
+  %(prog)s ~/Downloads/evernote_exports/                   Convert all .enex files in directory
+  %(prog)s recipes.enex -t "vegetarian,quick"              Add custom tags
+  %(prog)s recipes.enex -T "vegan,healthy"                 Override default tags completely
+  %(prog)s recipes.enex -c "Dessert,Quick"                 Add custom categories
+  %(prog)s recipes.enex -C "Main Dish,Italian"             Override default category completely
+  %(prog)s recipes.enex --debug                            Enable debug output
+  %(prog)s --test-url "https://example.com/recipe"         Test URL fetching
 
 Notes:
   - Output format is compatible with Nextcloud Recipes and other Schema.org Recipe systems
   - Web fetching prioritizes JSON-LD structured data for best accuracy
   - Images are downloaded and included when available from web sources
+  - For JSON-LD recipes from web sources, existing categories are preserved unless overridden
         """)
     
     # Positional arguments
     parser.add_argument('input', 
-                       help='Input .enex file or directory containing .enex files')
+                        help='Input .enex file or directory containing .enex files')
     parser.add_argument('output', nargs='?', default='recipes_export.zip', 
-                       help='Output zip file (default: recipes_export.zip)')
+                        help='Output zip file (default: recipes_export.zip)')
     
     # Tag options
     tag_group = parser.add_argument_group('Tag Options')
-    tag_group.add_argument('-t', '--tags', type=str, metavar='TAG1,TAG2,...',
-                          help='Comma-separated list of additional tags to append to recipes')
-    tag_group.add_argument('-T', '--tag-override', type=str, metavar='TAG1,TAG2,...',
-                          help='Comma-separated list of tags to replace default tags completely')
+    tag_group.add_argument('-t', '--tags', 
+                          type=str, metavar='TAG1,TAG2,...',
+                          help='Add additional tags to all recipes (comma-separated)')
+    tag_group.add_argument('-T', '--tags-override', 
+                          type=str, metavar='TAG1,TAG2,...',
+                          help='Replace default tags completely (comma-separated)')
+    
+    # Category options
+    category_group = parser.add_argument_group('Category Options')
+    category_group.add_argument('-c', '--categories', 
+                                type=str, metavar='CAT1,CAT2,...',
+                                help='Add additional categories to all recipes (comma-separated)')
+    category_group.add_argument('-C', '--categories-override', 
+                                type=str, metavar='CAT1,CAT2,...',
+                                help='Replace default/existing categories completely (comma-separated)')
     
     # Processing options
     process_group = parser.add_argument_group('Processing Options')
-    process_group.add_argument('--debug', action='store_true', 
-                              help='Enable debug output for troubleshooting')
-    process_group.add_argument('--no-web-fetch', action='store_true', 
+    process_group.add_argument('--debug', 
+                              action='store_true', 
+                              help='Enable detailed debug output for troubleshooting')
+    process_group.add_argument('--no-web-fetch', 
+                              action='store_true', 
                               help='Disable web content fetching (use only Evernote content)')
     
     # Testing options
     test_group = parser.add_argument_group('Testing Options')
-    test_group.add_argument('--test-url', type=str, metavar='URL',
-                           help='Test URL fetching with the given URL (for debugging)')
+    test_group.add_argument('--test-url', 
+                            type=str, metavar='URL',
+                            help='Test URL fetching with the given URL (for debugging)')
     
     args = parser.parse_args()
     
@@ -3007,10 +3067,24 @@ Notes:
         if args.debug:
             print(f"Additional tags: {additional_tags}")
     
-    if args.tag_override:
-        override_tags = [tag.strip() for tag in args.tag_override.split(',') if tag.strip()]
+    if args.tags_override:
+        override_tags = [tag.strip() for tag in args.tags_override.split(',') if tag.strip()]
         if args.debug:
             print(f"Override tags: {override_tags}")
+    
+    # Parse category arguments - preserve categories exactly as provided
+    additional_categories = []
+    override_categories = None
+    
+    if args.categories:
+        additional_categories = [cat.strip() for cat in args.categories.split(',') if cat.strip()]
+        if args.debug:
+            print(f"Additional categories: {additional_categories}")
+    
+    if args.categories_override:
+        override_categories = [cat.strip() for cat in args.categories_override.split(',') if cat.strip()]
+        if args.debug:
+            print(f"Override categories: {override_categories}")
     
     print(f"Converting Evernote recipes to Nextcloud format...")
     print(f"Input: {args.input}")
@@ -3021,12 +3095,19 @@ Notes:
     if override_tags:
         print(f"Tag override: {', '.join(override_tags)}")
     
+    if additional_categories:
+        print(f"Additional categories: {', '.join(additional_categories)}")
+    if override_categories:
+        print(f"Category override: {', '.join(override_categories)}")
+    
     converter = EvernoteToNextcloudConverter(
         args.input, 
         args.output, 
         debug=args.debug,
         additional_tags=additional_tags,
-        override_tags=override_tags
+        override_tags=override_tags,
+        additional_categories=additional_categories,
+        override_categories=override_categories
     )
     
     if args.no_web_fetch:
