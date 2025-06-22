@@ -122,6 +122,12 @@ class EvernoteToNextcloudConverter:
             content = content_elem.text if content_elem.text is not None else ""
             created = created_elem.text if created_elem is not None else None
             
+            # Get full ENML content including all child elements for fallback
+            if content_elem is not None:
+                fallback_text_content = ET.tostring(content_elem, encoding='unicode', method='xml')
+            else:
+                fallback_text_content = ""
+            
             if self.debug:
                 print(f"\n{'='*80}")
                 print(f"PROCESSING RECIPE: {title}")
@@ -237,45 +243,35 @@ class EvernoteToNextcloudConverter:
             # Post-process instructions to move misclassified ingredients back to ingredients list
             final_ingredients, final_instructions = self.post_process_ingredients_from_instructions(ingredients, instructions, title)
             
-            # Fallback: If no ingredients found, put entire note content as first instruction
+            # Fallback: If no ingredients found, put entire note content as the ONLY instruction
             if len(final_ingredients) == 0:
                 if self.debug:
-                    print(f"    No ingredients extracted - adding full note content as instruction fallback")
+                    print(f"    No ingredients extracted - using full note content as complete fallback")
                     print(f"    Processing method was: {processing_method}")
-                    print(f"    Content length: {len(content) if content else 0}")
+                    print(f"    Fallback text content length: {len(fallback_text_content) if fallback_text_content else 0}")
+                    print(f"    Fallback content preview: {fallback_text_content[:200] if fallback_text_content else 'None'}...")
                 
-                # Always get the raw Evernote content for fallback, regardless of processing method
-                if content:
-                    fallback_content = self.parse_content(content)
-                    if self.debug:
-                        print(f"    Parsed fallback content length: {len(fallback_content) if fallback_content else 0}")
+                # TODO: Fallback content extraction is broken for some recipes (1-2 cases so far)
+                # Issue: fallback_text_content contains full ENML XML but may still be too short/incomplete
+                # for some notes. The ET.tostring() approach should work but doesn't capture all content 
+                # in edge cases. Low priority fix since it only affects a small number of recipes.
+                
+                # Use the already-parsed text content for fallback
+                if fallback_text_content and len(fallback_text_content.strip()) > 10:
+                    # Replace ALL instructions with just the fallback content
+                    fallback_instruction = f"Recipe notes from Evernote:\n\n{fallback_text_content}"
+                    final_instructions = [fallback_instruction]
                     
-                    if fallback_content and len(fallback_content.strip()) > 10:
-                        # Clean up the content for instruction use
-                        clean_fallback = fallback_content.strip()
-                        # Remove any URLs that might be in the content
-                        clean_fallback = re.sub(r'https?://[^\s<>"\']+', '', clean_fallback)
-                        # Clean up extra whitespace
-                        clean_fallback = re.sub(r'\n\s*\n', '\n\n', clean_fallback)
-                        clean_fallback = re.sub(r'[ \t]+', ' ', clean_fallback)
-                        
-                        if clean_fallback and len(clean_fallback.strip()) > 10:
-                            # Add as the first instruction
-                            fallback_instruction = f"Recipe content from Evernote note:\n\n{clean_fallback}"
-                            final_instructions = [fallback_instruction] + final_instructions
-                            
-                            if self.debug:
-                                print(f"    Added fallback instruction ({len(clean_fallback)} chars)")
-                                print(f"    Final instructions count: {len(final_instructions)}")
-                        else:
-                            if self.debug:
-                                print(f"    Clean fallback too short: '{clean_fallback[:100]}...'")
-                    else:
-                        if self.debug:
-                            print(f"    Fallback content too short or empty")
+                    if self.debug:
+                        print(f"    Replaced all instructions with fallback content ({len(fallback_text_content)} chars)")
+                        print(f"    Fallback instruction preview: {fallback_instruction[:300]}...")
+                        print(f"    Final instructions count: {len(final_instructions)}")
                 else:
                     if self.debug:
-                        print(f"    No content available for fallback")
+                        print(f"    Fallback text content too short or empty")
+                        print(f"    Raw fallback_text_content: '{fallback_text_content}'" if fallback_text_content else "    fallback_text_content is None/empty")
+                    # If no usable content, use a simple fallback
+                    final_instructions = ["See original Evernote note for recipe details."]
             elif self.debug:
                 print(f"    Ingredients found ({len(final_ingredients)}), no fallback needed")
             
