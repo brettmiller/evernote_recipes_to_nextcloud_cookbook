@@ -122,26 +122,50 @@ class EvernoteToNextcloudConverter:
             # First, try to extract source URL from content
             source_url = self.extract_source_url(content, title)
             
-            # Try to fetch fresh content from URL
+            # Try to fetch fresh content from URL with JSON-LD priority
             web_content = None
             if source_url and self.enable_web_fetch:
                 web_content = self.fetch_recipe_from_url(source_url)
                 if web_content:
                     if self.debug:
-                        print(f"    Using web content from: {source_url}")
-                    # Use web content instead of Evernote content
-                    text_content = web_content
+                        print(f"    Fetched web content from: {source_url}")
+                    
+                    # PRIORITY 1: Try JSON-LD extraction
+                    json_ld_recipe = self.extract_structured_recipe_data(web_content)
+                    if json_ld_recipe:
+                        recipe_data = self.validate_and_use_json_ld_recipe(json_ld_recipe, title, created, source_url)
+                        if recipe_data:
+                            if self.debug:
+                                print(f"    SUCCESS: Using JSON-LD recipe data directly")
+                            # We have complete recipe data, skip text parsing and create recipe directly
+                            return self.create_recipe_from_json_ld(recipe_data, title, note)
+                    
+                    # PRIORITY 2: Fall back to HTML parsing if JSON-LD failed
+                    if self.debug:
+                        print(f"    JSON-LD not found or invalid, falling back to HTML parsing")
+                    # Use web content instead of Evernote content, but convert HTML to text first
+                    text_content = self.extract_recipe_from_html(web_content)
+                    if not text_content:
+                        # If HTML extraction failed, try basic HTML-to-text conversion
+                        text_content = self.html_to_text(web_content)
                     images = []  # Web content won't have embedded images
+                    processing_method = "HTML parsing (web content)"
                 else:
                     if self.debug:
                         print(f"    Failed to fetch web content, using Evernote content")
-                    # Fall back to Evernote content
+                    # PRIORITY 3: Fall back to Evernote content
                     text_content, images = self.parse_content_and_images(content, note)
+                    processing_method = "Evernote content (web fetch failed)"
             else:
                 if self.debug:
                     print(f"    No source URL found, using Evernote content")
                 # Parse content and extract images from Evernote
                 text_content, images = self.parse_content_and_images(content, note)
+                processing_method = "Evernote content (no URL found)"
+            
+            # Ensure images is always defined (empty list for web content)
+            if 'images' not in locals():
+                images = []
             
             # Add small delay to be respectful to websites
             if source_url and web_content:
@@ -178,7 +202,7 @@ class EvernoteToNextcloudConverter:
             )
             
             # Create recipe directory with images
-            return self.create_recipe_dir(self.recipe_counter, recipe_data, title, images, note, web_content)
+            return self.create_recipe_dir(self.recipe_counter, recipe_data, title, images, note, web_content, processing_method)
             
         except Exception as e:
             print(f"Error processing note: {e}")
@@ -250,7 +274,7 @@ class EvernoteToNextcloudConverter:
         
         return recipe
 
-    def create_recipe_dir(self, recipe_id: int, recipe_data: Dict, title: str, images: List[Dict], note: ET.Element, web_content: Optional[str] = None) -> Path:
+    def create_recipe_dir(self, recipe_id: int, recipe_data: Dict, title: str, images: List[Dict], note: ET.Element, web_content: Optional[str] = None, processing_method: str = "Evernote content") -> Path:
         """Create individual recipe directory for Nextcloud Recipes with images"""
         # Create safe directory name
         safe_title = re.sub(r'[^\w\s-]', '', title).strip()
@@ -261,11 +285,13 @@ class EvernoteToNextcloudConverter:
         recipe_dir = self.temp_dir / recipe_dir_name
         recipe_dir.mkdir(exist_ok=True)
         
-        # Extract and save only the first image
+        # Extract and save images based on processing method
         image_filenames = []
-        if images:  # Only process the first image
+        
+        # Only process Evernote images if we have actual image data from Evernote content
+        if images and processing_method.startswith("Evernote content"):
             try:
-                # Get the first image
+                # Get the first image from Evernote content
                 image_info = images[0]
                 
                 # Save image file with "full" name
@@ -277,25 +303,44 @@ class EvernoteToNextcloudConverter:
                 
                 image_filenames.append(image_filename)
                 if self.debug:
-                    print(f"    Saved image: {image_filename}")
+                    print(f"    Saved Evernote image: {image_filename}")
                 
             except Exception as e:
-                print(f"    Error saving image: {e}")
+                if self.debug:
+                    print(f"    Error saving Evernote image: {e}")
+        elif self.debug and not images:
+            print(f"    No images to process for {processing_method}")
+        elif self.debug:
+            print(f"    Skipping empty image list for {processing_method}")
         
         # Update recipe data with actual image filenames and regenerate instructions
         # Get the text content again to extract original instructions with placeholders
         if web_content:
-            # If we used web content, use that for regenerating instructions
-            original_instructions = self.extract_instructions(web_content, recipe_data["name"])
+            # If we used web content, we need to extract clean text from it for instruction parsing
+            if processing_method == "HTML parsing (web content)":
+                # For HTML parsing, we need to convert HTML to text first
+                clean_web_text = self.extract_recipe_from_html(web_content)
+                if not clean_web_text:
+                    clean_web_text = self.html_to_text(web_content)
+                original_instructions = self.extract_instructions(clean_web_text, recipe_data["name"])
+            else:
+                # For JSON-LD processing, this shouldn't happen, but handle it gracefully
+                original_instructions = self.extract_instructions(web_content, recipe_data["name"])
         else:
-            # Otherwise, re-parse the Evernote content
+            # For Evernote content, re-parse to get instructions with image placeholders
             title_elem = note.find('title')
             content_elem = note.find('content')
             content = content_elem.text if content_elem is not None and content_elem.text is not None else ""
             
-            # Re-parse content to get instructions with image placeholders
-            text_content, _ = self.parse_content_and_images(content, note)
-            original_instructions = self.extract_instructions(text_content, recipe_data["name"])
+            # Only parse with image placeholders if we're processing Evernote content
+            if processing_method.startswith("Evernote content"):
+                # Re-parse content to get instructions with image placeholders
+                text_content, _ = self.parse_content_and_images(content, note)
+                original_instructions = self.extract_instructions(text_content, recipe_data["name"])
+            else:
+                # For other methods, just parse as plain text
+                text_content = self.parse_content(content)
+                original_instructions = self.extract_instructions(text_content, recipe_data["name"])
         
         # Apply post-processing to the original instructions to get the final clean list
         _, clean_instructions = self.post_process_ingredients_from_instructions([], original_instructions, recipe_data["name"])
@@ -327,6 +372,7 @@ class EvernoteToNextcloudConverter:
             url_info = f" (web fetch failed for {recipe_data['url']})"
         
         print(f"  Recipe {recipe_id}: {title} ({len(image_filenames)} images){url_info}")
+        print(f"    ✓ Processing method: {processing_method}")
         return recipe_dir
 
     def create_export_zip(self, recipe_dirs: List[Path]):
@@ -580,6 +626,173 @@ class EvernoteToNextcloudConverter:
             print(f"    All strategies failed for URL")
         return None
     
+    def clean_recipe_url(self, url: str) -> str:
+        """Clean up recipe URL by removing unnecessary parameters and fragments"""
+        if not url:
+            return url
+        
+        # Remove fragment (anchor)
+        if '#' in url:
+            url = url.split('#')[0]
+        
+        # Remove common tracking and unnecessary parameters
+        if '?' in url:
+            base_url, params = url.split('?', 1)
+            param_pairs = params.split('&')
+            
+            # Keep only essential parameters
+            keep_params = []
+            essential_params = ['id', 'recipe', 'post', 'p', 'page']
+            
+            for param in param_pairs:
+                if '=' in param:
+                    param_name = param.split('=')[0].lower()
+                    if any(essential in param_name for essential in essential_params):
+                        keep_params.append(param)
+            
+            if keep_params:
+                url = base_url + '?' + '&'.join(keep_params)
+            else:
+                url = base_url
+        
+        return url
+
+    def _process_response(self, response) -> Optional[str]:
+        """Process HTTP response and return raw HTML content for JSON-LD extraction"""
+        if response.status_code != 200:
+            return None
+        
+        if len(response.text) < 100:
+            return None
+        
+        # Return raw HTML content so we can extract JSON-LD from it
+        # Don't extract recipe content here - that happens later in the main flow
+        return response.text
+
+    def _fetch_with_simple_headers(self, url: str) -> Optional[str]:
+        """Fetch with simple browser headers"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            return self._process_response(response)
+        except Exception as e:
+            if self.debug:
+                print(f"      Simple headers failed: {e}")
+            raise
+
+    def _fetch_with_curl_headers(self, url: str) -> Optional[str]:
+        """Fetch with curl-like headers"""
+        headers = {
+            'User-Agent': 'curl/7.68.0',
+            'Accept': '*/*'
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            return self._process_response(response)
+        except Exception as e:
+            if self.debug:
+                print(f"      Curl headers failed: {e}")
+            raise
+
+    def _fetch_with_basic_requests(self, url: str) -> Optional[str]:
+        """Fetch with basic requests (no custom headers)"""
+        try:
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            return self._process_response(response)
+        except Exception as e:
+            if self.debug:
+                print(f"      Basic requests failed: {e}")
+            raise
+
+    def _fetch_with_modern_browser(self, url: str) -> Optional[str]:
+        """Fetch with modern browser headers"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=20)
+            response.raise_for_status()
+            return self._process_response(response)
+        except Exception as e:
+            if self.debug:
+                print(f"      Modern browser failed: {e}")
+            raise
+
+    def _fetch_with_minimal_headers(self, url: str) -> Optional[str]:
+        """Fetch with minimal headers"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0'
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            return self._process_response(response)
+        except Exception as e:
+            if self.debug:
+                print(f"      Minimal headers failed: {e}")
+            raise
+
+    def _fetch_with_chrome_headers(self, url: str) -> Optional[str]:
+        """Fetch with Chrome-specific headers"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=25)
+            response.raise_for_status()
+            return self._process_response(response)
+        except Exception as e:
+            if self.debug:
+                print(f"      Chrome headers failed: {e}")
+            raise
+
+    def _fetch_with_safari_headers(self, url: str) -> Optional[str]:
+        """Fetch with Safari-specific headers"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=25)
+            response.raise_for_status()
+            return self._process_response(response)
+        except Exception as e:
+            if self.debug:
+                print(f"      Safari headers failed: {e}")
+            raise
+
     def _fetch_with_requests_session(self, url: str) -> Optional[str]:
         """Ultra-simple fetch with just requests.Session() - no custom headers at all"""
         try:
@@ -629,7 +842,7 @@ class EvernoteToNextcloudConverter:
             if self.debug:
                 print(f"      Requests session - ERROR: {type(e).__name__}: {e}")
             raise
-    
+
     def _process_response_lenient(self, response) -> Optional[str]:
         """Process response with very lenient validation for difficult sites"""
         if self.debug:
@@ -714,7 +927,7 @@ class EvernoteToNextcloudConverter:
             if self.debug:
                 print(f"      Making extended timeout request to: {url}")
             
-            # Add extended delay for very slow sites
+            # Add extended delay to be respectful
             time.sleep(5)
             
             response = session.get(url, timeout=60, allow_redirects=True)
@@ -737,695 +950,7 @@ class EvernoteToNextcloudConverter:
         finally:
             if session:
                 session.close()
-    
-    def _fetch_with_no_ssl_verification(self, url: str) -> Optional[str]:
-        """Last resort fetch with no SSL verification and very permissive settings"""
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'cross-site',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-            'Referer': 'https://www.google.com/',
-        }
-        
-        session = None
-        try:
-            session = requests.Session()
-            session.headers.update(headers)
-            session.verify = False  # No SSL verification at all
-            
-            if self.debug:
-                print(f"      Making no-SSL request to: {url}")
-            
-            # Extended delay and timeout for last resort
-            time.sleep(7)
-            
-            response = session.get(url, timeout=90, allow_redirects=True)
-            
-            if self.debug:
-                print(f"      Got response: {response.status_code}")
-                print(f"      Content length: {len(response.text)}")
-                print(f"      Headers: {dict(list(response.headers.items())[:5])}")
-            
-            # Accept any response that has substantial content
-            if response.status_code in [200, 301, 302, 304, 403, 429, 500, 503] and len(response.text) > 100:
-                return self._process_response_lenient(response)
-            else:
-                if self.debug:
-                    print(f"      Unexpected status or empty response")
-                response.raise_for_status()
-                return self._process_response_lenient(response)
-                
-        except Exception as e:
-            if self.debug:
-                print(f"      No SSL verification - ERROR: {type(e).__name__}: {e}")
-            raise
-        finally:
-            if session:
-                session.close()
 
-    def clean_recipe_url(self, url: str) -> str:
-        """Clean up recipe URLs by removing unwanted path segments and parameters"""
-        if not url:
-            return url
-        
-        # Remove fragments first (everything after #)
-        url = url.split('#')[0]
-        
-        # Remove common unwanted path segments
-        unwanted_segments = [
-            '/print',
-            '/print/',
-            '/amp',
-            '/amp/',
-            '/mobile',
-            '/mobile/',
-            '/comments',
-            '/comments/',
-            '/comment',
-            '/comment/',
-            '/respond',
-            '/respond/',
-            '/feed',
-            '/feed/',
-            '/rss',
-            '/rss/',
-            '/trackback',
-            '/trackback/',
-        ]
-        
-        # Remove unwanted segments and everything after them
-        for segment in unwanted_segments:
-            if segment in url:
-                # Find the position and truncate
-                pos = url.find(segment)
-                if pos > 0:
-                    # Only truncate if the segment isn't part of the main path
-                    # Check if there's a meaningful path before the unwanted segment
-                    before_segment = url[:pos]
-                    if before_segment.rstrip('/').count('/') >= 3:  # Has at least https://domain.com/path
-                        url = before_segment.rstrip('/')
-                        if self.debug:
-                            print(f"      Removed segment '{segment}' from URL")
-                        break
-        
-        # Remove unwanted query parameters but keep others
-        if '?' in url:
-            base_url, query_string = url.split('?', 1)
-            
-            # Parse query parameters
-            params = []
-            for param in query_string.split('&'):
-                if '=' in param:
-                    key, value = param.split('=', 1)
-                    # Skip tracking and unwanted parameters
-                    unwanted_params = [
-                        'utm_', 'ref', 'src', 'fbclid', 'gclid', 'mc_', 'campaign',
-                        'medium', 'source', 'content', 'term', 'cid', 'sid',
-                        'print', 'share', 'comment', 'respond'
-                    ]
-                    
-                    # Keep parameter only if it doesn't start with unwanted prefixes
-                    if not any(key.lower().startswith(unwanted) for unwanted in unwanted_params):
-                        params.append(param)
-            
-            # Rebuild URL with clean parameters
-            if params:
-                url = base_url + '?' + '&'.join(params)
-            else:
-                url = base_url
-        
-        # Remove only trailing semicolons and /; combinations (don't touch other punctuation)
-        original_url = url
-        
-        # Loop through and remove trailing ; and / until none remain
-        while url.endswith(';') or url.endswith('/'):
-            if url.endswith(';'):
-                url = url[:-1]  # Remove trailing semicolon
-            if url.endswith('/'):
-                url = url[:-1]  # Remove trailing slash
-        
-        # Debug output to see what's happening
-        if self.debug and original_url != url:
-            print(f"      URL cleaned: '{original_url}' -> '{url}'")
-        
-        return url
-
-    def _fetch_with_modern_browser(self, url: str) -> Optional[str]:
-        """Fetch with full modern browser headers"""
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-        }
-        
-        session = None
-        try:
-            session = requests.Session()
-            session.headers.update(headers)
-            session.verify = True  # Enable SSL verification by default
-            
-            if self.debug:
-                print(f"      Making modern browser request to: {url} (SSL verification: ON)")
-            
-            response = session.get(url, timeout=15, allow_redirects=True)
-            
-            if response.status_code in [403, 429, 503]:
-                # Try with referer
-                headers['Referer'] = 'https://www.google.com/'
-                session.headers.update(headers)
-                time.sleep(1)
-                response = session.get(url, timeout=15, allow_redirects=True)
-            
-            if self.debug:
-                print(f"      Got response: {response.status_code}")
-            response.raise_for_status()
-            return self._process_response(response)
-        except requests.exceptions.SSLError as e:
-            if self.debug:
-                print(f"      Modern browser - SSL ERROR: {e}")
-                print(f"      Retrying with SSL verification disabled...")
-            # Try without SSL verification as fallback
-            try:
-                if session:
-                    session.verify = False
-                    response = session.get(url, timeout=15, allow_redirects=True)
-                    
-                    if response.status_code in [403, 429, 503]:
-                        # Try with referer
-                        headers['Referer'] = 'https://www.google.com/'
-                        session.headers.update(headers)
-                        time.sleep(1)
-                        response = session.get(url, timeout=15, allow_redirects=True)
-                    
-                    if self.debug:
-                        print(f"      Got response (no SSL): {response.status_code}")
-                    response.raise_for_status()
-                    return self._process_response(response)
-            except Exception as e2:
-                if self.debug:
-                    print(f"      Modern browser - SSL fallback also failed: {e2}")
-                raise e
-        except requests.exceptions.Timeout as e:
-            if self.debug:
-                print(f"      Modern browser - TIMEOUT: {e}")
-            raise
-        except requests.exceptions.ConnectionError as e:
-            if self.debug:
-                print(f"      Modern browser - CONNECTION ERROR: {e}")
-            raise
-        except requests.exceptions.HTTPError as e:
-            if self.debug:
-                status_code = getattr(e.response, 'status_code', 'unknown') if hasattr(e, 'response') else 'unknown'
-                print(f"      Modern browser - HTTP ERROR: {e} (status: {status_code})")
-            raise
-        except Exception as e:
-            if self.debug:
-                print(f"      Modern browser - OTHER ERROR: {type(e).__name__}: {e}")
-            raise
-        finally:
-            if session:
-                session.close()
-    
-    def _fetch_with_simple_headers(self, url: str) -> Optional[str]:
-        """Fetch with minimal, less suspicious headers"""
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive',
-        }
-        
-        session = None
-        try:
-            # Use session for better connection handling
-            session = requests.Session()
-            session.headers.update(headers)
-            
-            # Start with SSL verification enabled (secure by default)
-            session.verify = True
-            session.max_redirects = 3
-            
-            if self.debug:
-                print(f"      Making request to: {url} (SSL verification: ON)")
-            
-            # Try with a shorter timeout first
-            response = session.get(url, timeout=10, allow_redirects=True)
-            
-            if self.debug:
-                print(f"      Got response: {response.status_code}")
-            
-            response.raise_for_status()
-            return self._process_response(response)
-            
-        except requests.exceptions.SSLError as e:
-            if self.debug:
-                print(f"      Simple headers - SSL ERROR: {e}")
-                print(f"      Retrying with SSL verification disabled...")
-            # Try without SSL verification as fallback
-            try:
-                if session:
-                    session.verify = False
-                    response = session.get(url, timeout=10, allow_redirects=True)
-                    if self.debug:
-                        print(f"      Got response (no SSL): {response.status_code}")
-                    response.raise_for_status()
-                    return self._process_response(response)
-            except Exception as e2:
-                if self.debug:
-                    print(f"      Simple headers - SSL fallback also failed: {e2}")
-                raise e
-        except requests.exceptions.Timeout as e:
-            if self.debug:
-                print(f"      Simple headers - TIMEOUT: {e}")
-            # Try one more time with longer timeout
-            try:
-                if session:
-                    response = session.get(url, timeout=30, allow_redirects=True)
-                    response.raise_for_status()
-                    return self._process_response(response)
-            except Exception as e2:
-                if self.debug:
-                    print(f"      Simple headers - Second attempt failed: {e2}")
-                raise e
-        except requests.exceptions.ConnectionError as e:
-            if self.debug:
-                print(f"      Simple headers - CONNECTION ERROR: {e}")
-            raise
-        except requests.exceptions.HTTPError as e:
-            if self.debug:
-                status_code = getattr(e.response, 'status_code', 'unknown') if hasattr(e, 'response') else 'unknown'
-                print(f"      Simple headers - HTTP ERROR: {e} (status: {status_code})")
-            raise
-        except Exception as e:
-            if self.debug:
-                print(f"      Simple headers - OTHER ERROR: {type(e).__name__}: {e}")
-            raise
-        finally:
-            if session:
-                session.close()
-    
-    def _fetch_with_curl_headers(self, url: str) -> Optional[str]:
-        """Fetch with curl-like headers (often works better than browser simulation)"""
-        headers = {
-            'User-Agent': 'curl/8.4.0',
-            'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-        }
-        
-        session = None
-        try:
-            session = requests.Session()
-            session.headers.update(headers)
-            session.verify = True  # Enable SSL verification by default
-            
-            if self.debug:
-                print(f"      Making curl-style request to: {url} (SSL verification: ON)")
-            
-            response = session.get(url, timeout=15, allow_redirects=True)
-            if self.debug:
-                print(f"      Got response: {response.status_code}")
-            response.raise_for_status()
-            return self._process_response(response)
-        except requests.exceptions.SSLError as e:
-            if self.debug:
-                print(f"      Curl headers - SSL ERROR: {e}")
-                print(f"      Retrying with SSL verification disabled...")
-            # Try without SSL verification as fallback
-            try:
-                if session:
-                    session.verify = False
-                    response = session.get(url, timeout=15, allow_redirects=True)
-                    if self.debug:
-                        print(f"      Got response (no SSL): {response.status_code}")
-                    response.raise_for_status()
-                    return self._process_response(response)
-            except Exception as e2:
-                if self.debug:
-                    print(f"      Curl headers - SSL fallback also failed: {e2}")
-                raise e
-        except requests.exceptions.Timeout as e:
-            if self.debug:
-                print(f"      Curl headers - TIMEOUT: {e}")
-            raise
-        except requests.exceptions.ConnectionError as e:
-            if self.debug:
-                print(f"      Curl headers - CONNECTION ERROR: {e}")
-            raise
-        except requests.exceptions.HTTPError as e:
-            if self.debug:
-                status_code = getattr(e.response, 'status_code', 'unknown') if hasattr(e, 'response') else 'unknown'
-                print(f"      Curl headers - HTTP ERROR: {e} (status: {status_code})")
-            raise
-        except Exception as e:
-            if self.debug:
-                print(f"      Curl headers - OTHER ERROR: {type(e).__name__}: {e}")
-            raise
-        finally:
-            if session:
-                session.close()
-    
-    def _fetch_with_basic_requests(self, url: str) -> Optional[str]:
-        """Ultra-simple fetch with no special headers or session management"""
-        try:
-            if self.debug:
-                print(f"      Making basic request to: {url} (SSL verification: ON)")
-            
-            # Most basic request possible - no custom headers, but with SSL verification first
-            response = requests.get(url, timeout=15, verify=True)
-            
-            if self.debug:
-                print(f"      Got response: {response.status_code}")
-            
-            response.raise_for_status()
-            return self._process_response(response)
-            
-        except requests.exceptions.SSLError as e:
-            if self.debug:
-                print(f"      Basic requests - SSL ERROR: {e}")
-                print(f"      Retrying with SSL verification disabled...")
-            # Try without SSL verification as fallback
-            try:
-                response = requests.get(url, timeout=15, verify=False)
-                if self.debug:
-                    print(f"      Got response (no SSL): {response.status_code}")
-                response.raise_for_status()
-                return self._process_response(response)
-            except Exception as e2:
-                if self.debug:
-                    print(f"      Basic requests - SSL fallback also failed: {e2}")
-                raise e
-        except requests.exceptions.Timeout as e:
-            if self.debug:
-                print(f"      Basic requests - TIMEOUT: {e}")
-            raise
-        except requests.exceptions.ConnectionError as e:
-            if self.debug:
-                print(f"      Basic requests - CONNECTION ERROR: {e}")
-            raise
-        except requests.exceptions.HTTPError as e:
-            if self.debug:
-                status_code = getattr(e.response, 'status_code', 'unknown') if hasattr(e, 'response') else 'unknown'
-                print(f"      Basic requests - HTTP ERROR: {e} (status: {status_code})")
-            raise
-        except Exception as e:
-            if self.debug:
-                print(f"      Basic requests - OTHER ERROR: {type(e).__name__}: {e}")
-            raise
-    
-    def _fetch_with_minimal_headers(self, url: str) -> Optional[str]:
-        """Fetch with absolute minimal headers (most permissive)"""
-        headers = {
-            'User-Agent': 'python-requests/2.31.0',
-            'Accept': 'text/html,application/xhtml+xml,*/*',
-        }
-        
-        try:
-            response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
-            if self.debug:
-                print(f"      Got response: {response.status_code}")
-            response.raise_for_status()
-            return self._process_response(response)
-        except requests.exceptions.Timeout as e:
-            if self.debug:
-                print(f"      Minimal headers - TIMEOUT: {e}")
-            raise
-        except requests.exceptions.ConnectionError as e:
-            if self.debug:
-                print(f"      Minimal headers - CONNECTION ERROR: {e}")
-            raise
-        except requests.exceptions.HTTPError as e:
-            if self.debug:
-                status_code = getattr(e.response, 'status_code', 'unknown') if hasattr(e, 'response') else 'unknown'
-                print(f"      Minimal headers - HTTP ERROR: {e} (status: {status_code})")
-            raise
-        except Exception as e:
-            if self.debug:
-                print(f"      Minimal headers - OTHER ERROR: {type(e).__name__}: {e}")
-            raise
-    
-    def _process_response(self, response) -> Optional[str]:
-        """Process HTTP response and extract recipe content"""
-        if self.debug:
-            print(f"      Response status: {response.status_code}")
-            print(f"      Content length: {len(response.text)} chars")
-            print(f"      Content-Type: {response.headers.get('content-type', 'unknown')}")
-        
-        # Check if we got a reasonable response - be more lenient for major sites
-        min_content_length = 100
-        if any(site in response.url.lower() for site in ['seriouseats.com', 'nytimes.com', 'foodnetwork.com', 'allrecipes.com']):
-            min_content_length = 50  # More lenient for major recipe sites
-        
-        if len(response.text) < min_content_length:
-            if self.debug:
-                print(f"      Response too short ({len(response.text)} chars, minimum: {min_content_length})")
-            return None
-        
-        # Check content type - be more lenient
-        content_type = response.headers.get('content-type', '').lower()
-        if content_type and not any(ct in content_type for ct in ['text/html', 'application/xhtml', 'text/plain']):
-            if self.debug:
-                print(f"      Invalid content type: {content_type}")
-            return None
-        
-        # Check for common blocking indicators - be very conservative
-        response_text_lower = response.text.lower()
-        blocking_indicators = [
-            'access denied',
-            'forbidden',
-            'you are being blocked',
-            'bot detected',
-            'security check required',
-            'rate limit exceeded',
-            'temporarily unavailable',
-        ]
-        
-        # Only check first 1000 characters for blocking indicators
-        page_start = response_text_lower[:1000]
-        found_blocking = None
-        for indicator in blocking_indicators:
-            if indicator in page_start:
-                found_blocking = indicator
-                break
-        
-        if found_blocking:
-            if self.debug:
-                print(f"      Response contains blocking indicator: {found_blocking}")
-            # For major recipe sites, be very lenient - proceed if we have any substantial content
-            if any(site in response.url.lower() for site in ['seriouseats.com', 'nytimes.com', 'foodnetwork.com', 'allrecipes.com']):
-                if len(response.text) > 1000:
-                    if self.debug:
-                        print(f"      Major recipe site with content ({len(response.text)} chars) - proceeding anyway")
-                else:
-                    return None
-            else:
-                # For other sites, require more substantial content to proceed despite blocking indicator
-                if len(response.text) > 5000:
-                    if self.debug:
-                        print(f"      Substantial content ({len(response.text)} chars) - proceeding anyway")
-                else:
-                    return None
-        
-        # Parse HTML content
-        recipe_content = self.extract_recipe_from_html(response.text)
-        
-        if recipe_content and len(recipe_content.strip()) > 50:
-            if self.debug:
-                print(f"      Successfully extracted {len(recipe_content)} characters")
-                print(f"      Content preview: {recipe_content[:200]}...")
-            return recipe_content
-        else:
-            if self.debug:
-                print(f"      No substantial recipe content found")
-                # Show a sample of what we got for debugging
-                if response.text:
-                    print(f"      HTML preview: {response.text[:300]}...")
-            return None
-    
-    def _fetch_with_chrome_headers(self, url: str) -> Optional[str]:
-        """Fetch with Chrome-specific headers for difficult sites"""
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-            'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"macOS"',
-        }
-        
-        session = None
-        try:
-            session = requests.Session()
-            session.headers.update(headers)
-            session.verify = True  # Try SSL verification first
-            
-            if self.debug:
-                print(f"      Making Chrome-style request to: {url} (SSL verification: ON)")
-            
-            response = session.get(url, timeout=20, allow_redirects=True)
-            
-            if self.debug:
-                print(f"      Got response: {response.status_code}")
-            
-            response.raise_for_status()
-            return self._process_response(response)
-            
-        except requests.exceptions.SSLError as e:
-            if self.debug:
-                print(f"      Chrome headers - SSL ERROR: {e}")
-                print(f"      Retrying with SSL verification disabled...")
-            # Try without SSL verification as fallback
-            try:
-                if session:
-                    session.verify = False
-                    response = session.get(url, timeout=20, allow_redirects=True)
-                    if self.debug:
-                        print(f"      Got response (no SSL): {response.status_code}")
-                    response.raise_for_status()
-                    return self._process_response(response)
-            except Exception as e2:
-                if self.debug:
-                    print(f"      Chrome headers - SSL fallback also failed: {e2}")
-                raise e
-        except Exception as e:
-            if self.debug:
-                print(f"      Chrome headers - ERROR: {type(e).__name__}: {e}")
-            raise
-        finally:
-            if session:
-                session.close()
-    
-    def _fetch_with_safari_headers(self, url: str) -> Optional[str]:
-        """Fetch with Safari-specific headers as final fallback"""
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
-        
-        session = None
-        try:
-            session = requests.Session()
-            session.headers.update(headers)
-            session.verify = True  # Try SSL verification first (even for difficult sites as final fallback)
-            
-            if self.debug:
-                print(f"      Making Safari-style request to: {url} (SSL verification: ON)")
-            
-            # Add a longer delay for Safari simulation
-            time.sleep(2)
-            
-            response = session.get(url, timeout=25, allow_redirects=True)
-            
-            if self.debug:
-                print(f"      Got response: {response.status_code}")
-            
-            response.raise_for_status()
-            return self._process_response(response)
-            
-        except requests.exceptions.SSLError as e:
-            if self.debug:
-                print(f"      Safari headers - SSL ERROR: {e}")
-                print(f"      Retrying with SSL verification disabled (final fallback)...")
-            # Try without SSL verification as final fallback
-            try:
-                if session:
-                    session.verify = False
-                    response = session.get(url, timeout=25, allow_redirects=True)
-                    if self.debug:
-                        print(f"      Got response (no SSL): {response.status_code}")
-                    response.raise_for_status()
-                    return self._process_response(response)
-            except Exception as e2:
-                if self.debug:
-                    print(f"      Safari headers - SSL fallback also failed: {e2}")
-                raise e
-        except Exception as e:
-            if self.debug:
-                print(f"      Safari headers - ERROR: {type(e).__name__}: {e}")
-            raise
-        finally:
-            if session:
-                session.close()
-
-    def _fetch_with_extended_timeout(self, url: str) -> Optional[str]:
-        """Fetch with extended timeouts and delays for very slow/stubborn sites"""
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Referer': 'https://www.google.com/',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-        }
-        
-        session = None
-        try:
-            session = requests.Session()
-            session.headers.update(headers)
-            session.verify = False  # Disable SSL for stubborn sites
-            
-            if self.debug:
-                print(f"      Making extended timeout request to: {url}")
-            
-            # Add extended delay for very slow sites
-            time.sleep(5)
-            
-            response = session.get(url, timeout=60, allow_redirects=True)
-            
-            if self.debug:
-                print(f"      Got response: {response.status_code}")
-                print(f"      Content length: {len(response.text)}")
-            
-            # Be very lenient with status codes
-            if response.status_code in [200, 301, 302, 304, 403, 429] and len(response.text) > 100:
-                return self._process_response_lenient(response)
-            else:
-                response.raise_for_status()
-                return self._process_response_lenient(response)
-                
-        except Exception as e:
-            if self.debug:
-                print(f"      Extended timeout - ERROR: {type(e).__name__}: {e}")
-            raise
-        finally:
-            if session:
-                session.close()
-    
     def _fetch_with_no_ssl_verification(self, url: str) -> Optional[str]:
         """Last resort fetch with no SSL verification and very permissive settings"""
         headers = {
@@ -2560,40 +2085,32 @@ class EvernoteToNextcloudConverter:
         """Check if a line looks like a cooking instruction (more strict than is_instruction_line)"""
         line_lower = line.lower()
         
-        # If line has strong measurement patterns, it's probably an ingredient, not instruction
-        ingredient_patterns = [
-            r'\d+\s*(cup|cups|tbsp|tablespoons|tsp|teaspoons|lb|lbs|pound|pounds|oz|ounces|g|grams|kg|ml|liter|liters)\b',
-            r'[¼½¾⅓⅔⅛⅜⅝⅞]\s*(cup|cups|tbsp|tablespoons|tsp|teaspoons)',  # Unicode fractions
-            r'\d+/\d+\s*(cup|cups|tbsp|tablespoons|tsp|teaspoons)',  # Regular fractions
-            r'^\d+\s+[a-zA-Z]',  # Number at start followed by ingredient
-        ]
-        
-        if any(re.search(pattern, line_lower) for pattern in ingredient_patterns):
+        # Exclude serving/yield info first
+        if re.search(r'\b(serves?|servings?|yield|makes?)\s+\d+\b', line_lower):
             return False
         
-        # Strong instruction verbs that indicate cooking actions (not ingredient prep)
-        strong_instruction_verbs = [
-            'preheat', 'heat the', 'cook the', 'bake for', 'boil for', 'simmer for', 
-            'sauté until', 'fry until', 'mix together', 'stir in', 'whisk until', 
-            'beat until', 'fold in', 'combine all', 'add to', 'pour into',
-            'place in', 'put in', 'set aside', 'remove from', 'take out', 
-            'serve with', 'garnish with', 'season with', 'taste and', 
-            'adjust', 'cover and', 'uncover', 'drain and'
+        # Exclude time information (but not cooking instructions that mention time)
+        # Only reject standalone time references like "Prep time: 15 minutes" or "Cook time: 30 min"
+        if re.search(r'\b(prep|cook|total)\s+time\b', line_lower):
+            return False
+        
+        # Must be longer than typical ingredients
+        if len(line) < 20:
+            return False
+        
+        instruction_keywords = [
+            'cook', 'bake', 'mix', 'add', 'heat', 'stir', 'pour', 'place', 
+            'remove', 'serve', 'prepare', 'combine', 'season', 'boil', 
+            'simmer', 'fry', 'chop', 'slice', 'dice', 'mince', 'whisk',
+            'blend', 'fold', 'beat', 'knead', 'roll', 'spread', 'brush',
+            'drizzle', 'sprinkle', 'garnish', 'chill', 'freeze', 'thaw',
+            'create','preheat', 'until', 'then', 'next', 'meanwhile'
         ]
         
-        # Only trigger on strong instruction phrases, not simple prep words
-        if any(verb in line_lower for verb in strong_instruction_verbs) and len(line) > 15:
-            return True
+        # Use word boundaries to match complete words only
+        has_instruction_keyword = any(re.search(r'\b' + re.escape(keyword) + r'\b', line_lower) for keyword in instruction_keywords)
         
-        # Sequential indicators (step 1, first, then, next, etc.)
-        if re.search(r'\b(step\s+\d+|first|then|next|meanwhile|after|before|until|when)\b', line_lower):
-            return True
-        
-        # Temperature/time references (usually instructions)
-        if re.search(r'\b\d+\s*(degrees?|°|minutes?|hours?|mins?|hrs?)\b', line_lower):
-            return True
-        
-        return False
+        return has_instruction_keyword
 
     def extract_instructions(self, content: str, recipe_title: str = "Unknown Recipe") -> List[str]:
         """Extract cooking instructions with inline images"""
@@ -2853,70 +2370,301 @@ class EvernoteToNextcloudConverter:
         
         return new_ingredients, new_instructions
 
+    def extract_structured_recipe_data(self, html_content: str) -> Optional[dict]:
+        """Extract JSON-LD Recipe data from HTML and return as dict, or None if not found."""
+        json_ld_patterns = [
+            r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+            r'<script[^>]*type=["\']application/ld\+json["\']>(.*?)</script>',
+        ]
+        
+        for pattern in json_ld_patterns:
+            matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
+            for match in matches:
+                try:
+                    # Clean up the JSON (remove comments)
+                    clean_json = re.sub(r'//.*?\n', '', match)
+                    clean_json = re.sub(r'/\*.*?\*/', '', clean_json, flags=re.DOTALL)
+                    
+                    json_data = json.loads(clean_json)
+                    
+                    # Handle both dict and list
+                    items = json_data if isinstance(json_data, list) else [json_data]
+                    
+                    for item in items:
+                        # Check direct @type
+                        if item.get('@type') == 'Recipe':
+                            return item
+                        # Check if @type is a list containing 'Recipe'
+                        if isinstance(item.get('@type'), list) and 'Recipe' in item.get('@type'):
+                            return item
+                        # Check @graph
+                        if '@graph' in item:
+                            for graph_item in item['@graph']:
+                                if isinstance(graph_item, dict):
+                                    gtype = graph_item.get('@type')
+                                    if gtype == 'Recipe' or (isinstance(gtype, list) and 'Recipe' in gtype):
+                                        return graph_item
+                except Exception:
+                    continue
+        
+        return None
+
+    def validate_and_use_json_ld_recipe(self, json_ld_recipe: dict, recipe_title: str, created: Optional[str] = None, source_url: str = "") -> Optional[Dict]:
+        """Validate JSON-LD Recipe data and use directly if valid, with minimal cleanup"""
+        try:
+            if self.debug:
+                print(f"    Validating JSON-LD recipe data for: {json_ld_recipe.get('name', recipe_title)}")
+            
+            # Check required fields
+            if not json_ld_recipe.get('name'):
+                if self.debug:
+                    print(f"    JSON-LD missing required 'name' field")
+                return None
+                
+            if not json_ld_recipe.get('recipeIngredient') or not json_ld_recipe.get('recipeInstructions'):
+                if self.debug:
+                    print(f"    JSON-LD missing ingredients or instructions")
+                return None
+            
+            # Use the JSON-LD data directly
+            recipe = json_ld_recipe.copy()
+            
+            # Ensure required JSON-LD structure
+            recipe["@context"] = "https://schema.org"
+            recipe["@type"] = "Recipe"
+            
+            # Only add metadata if it's missing (don't override good existing data)
+            if not recipe.get("dateCreated") and created:
+                recipe["dateCreated"] = self.format_datetime(created)
+            
+            if not recipe.get("url") and source_url:
+                recipe["url"] = source_url
+                
+            if not recipe.get("orgURL") and source_url:
+                recipe["orgURL"] = source_url
+            
+            # Only add description if completely missing
+            if not recipe.get("description"):
+                recipe["description"] = "Recipe imported from web"
+            
+            if self.debug:
+                ingredients_count = len(recipe.get('recipeIngredient', []))
+                instructions_count = len(recipe.get('recipeInstructions', []))
+                print(f"    Using JSON-LD directly: {ingredients_count} ingredients, {instructions_count} instructions")
+            
+            return recipe
+            
+        except Exception as e:
+            if self.debug:
+                print(f"    Error validating JSON-LD recipe: {e}")
+            return None
+
+    def download_and_update_json_ld_images(self, recipe_data: Dict, recipe_dir: Path) -> Dict:
+        """Download images from JSON-LD URLs and update paths to relative local paths"""
+        try:
+            if not recipe_data.get('image'):
+                return recipe_data
+            
+            updated_recipe = recipe_data.copy()
+            image_urls = []
+            
+            # Handle different image formats in JSON-LD
+            image_data = recipe_data['image']
+            if isinstance(image_data, str):
+                image_urls = [image_data]
+            elif isinstance(image_data, list):
+                for img in image_data:
+                    if isinstance(img, str):
+                        image_urls.append(img)
+                    elif isinstance(img, dict) and 'url' in img:
+                        image_urls.append(img['url'])
+            elif isinstance(image_data, dict) and 'url' in image_data:
+                image_urls = [image_data['url']]
+            
+            # Filter and clean image URLs
+            cleaned_urls = []
+            for url in image_urls:
+                if url and isinstance(url, str):
+                    # Convert relative URLs to absolute if we have a base URL
+                    if url.startswith('//'):
+                        url = 'https:' + url
+                    elif url.startswith('/') and recipe_data.get('url'):
+                        from urllib.parse import urljoin
+                        url = urljoin(recipe_data['url'], url)
+                    elif url.startswith('http'):
+                        pass  # Already absolute
+                    else:
+                        continue  # Skip invalid URLs
+                    
+                    cleaned_urls.append(url)
+            
+            if not cleaned_urls:
+                return recipe_data
+                
+            if self.debug:
+                print(f"    Found {len(cleaned_urls)} valid images to download from JSON-LD")
+            
+            downloaded_images = []
+            for i, img_url in enumerate(cleaned_urls):
+                try:
+                    if self.debug:
+                        print(f"    Downloading image {i+1}/{len(cleaned_urls)}: {img_url}")
+                    
+                    # Download image with better headers
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    }
+                    response = requests.get(img_url, timeout=15, stream=True, headers=headers)
+                    response.raise_for_status()
+                    
+                    # Check content length to avoid downloading huge files
+                    content_length = response.headers.get('content-length')
+                    if content_length and int(content_length) > 10 * 1024 * 1024:  # 10MB limit
+                        if self.debug:
+                            print(f"    Skipping image - too large: {content_length} bytes")
+                        continue
+                    
+                    # Determine file extension
+                    content_type = response.headers.get('content-type', '').lower()
+                    if 'jpeg' in content_type or 'jpg' in content_type:
+                        ext = '.jpg'
+                    elif 'png' in content_type:
+                        ext = '.png'
+                    elif 'webp' in content_type:
+                        ext = '.webp'
+                    elif 'gif' in content_type:
+                        ext = '.gif'
+                    else:
+                        # Try to get from URL
+                        ext = Path(img_url.split('?')[0]).suffix.lower()
+                        if ext not in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
+                            ext = '.jpg'  # Default
+                    
+                    # Save image with descriptive name - use "full" for first image to match Nextcloud convention
+                    if i == 0:
+                        image_filename = f"full{ext}"
+                    else:
+                        image_filename = f"image_{i+1}{ext}"
+                    image_path = recipe_dir / image_filename
+                    
+                    # Download and save the image
+                    with open(image_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:  # Filter out keep-alive chunks
+                                f.write(chunk)
+                    
+                    # Verify the image was downloaded properly
+                    if image_path.exists() and image_path.stat().st_size > 0:
+                        downloaded_images.append(image_filename)
+                        
+                        if self.debug:
+                            print(f"    Saved image as: {image_filename} ({image_path.stat().st_size} bytes)")
+                    else:
+                        if self.debug:
+                            print(f"    Failed to save image properly: {image_filename}")
+                        # Clean up empty file
+                        if image_path.exists():
+                            image_path.unlink()
+                        
+                except Exception as e:
+                    if self.debug:
+                        print(f"    Failed to download image {img_url}: {e}")
+                    continue
+            
+            # Update recipe data with local image paths
+            if downloaded_images:
+                if len(downloaded_images) == 1:
+                    updated_recipe['image'] = downloaded_images[0]
+                else:
+                    updated_recipe['image'] = downloaded_images
+                
+                if self.debug:
+                    print(f"    Updated recipe with {len(downloaded_images)} local images")
+            
+            return updated_recipe
+            
+        except Exception as e:
+            if self.debug:
+                print(f"    Error downloading JSON-LD images: {e}")
+            return recipe_data
+
+    def create_recipe_from_json_ld(self, recipe_data: Dict, title: str, note: ET.Element) -> Optional[Path]:
+        """Create recipe directory directly from JSON-LD data without text parsing"""
+        try:
+            if self.debug:
+                print(f"    Creating recipe from JSON-LD data for: {recipe_data.get('name', title)}")
+            
+            # Create recipe directory
+            self.recipe_counter += 1
+            safe_title = re.sub(r'[^\w\s-]', '', title).strip()
+            safe_title = re.sub(r'[\s]+', '_', safe_title)
+            recipe_dir_name = f"{safe_title}_{self.recipe_counter}"
+            
+            recipe_dir = self.temp_dir / recipe_dir_name
+            recipe_dir.mkdir(exist_ok=True)
+            
+            # Handle images if they exist in the JSON-LD (download from URLs)
+            recipe_data = self.download_and_update_json_ld_images(recipe_data, recipe_dir)
+            
+            # Create recipe.json file
+            json_file = recipe_dir / "recipe.json"
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(recipe_data, f, indent=2, ensure_ascii=False)
+            
+            if self.debug:
+                ingredients_count = len(recipe_data.get('recipeIngredient', []))
+                instructions_count = len(recipe_data.get('recipeInstructions', []))
+                print(f"    Created JSON-LD recipe: {ingredients_count} ingredients, {instructions_count} instructions")
+            
+            print(f"  Recipe {self.recipe_counter}: {title} (JSON-LD from {recipe_data.get('url', 'web')})")
+            print(f"    ✓ Processing method: JSON-LD (structured data from web)")
+            return recipe_dir
+            
+        except Exception as e:
+            if self.debug:
+                print(f"    Error creating recipe from JSON-LD: {e}")
+            return None
 
 def test_url_fetch(url: str, debug: bool = True):
-    """Test function to verify URL fetching works"""
-    print(f"Testing URL: {url}")
-    
-    # Create a minimal converter instance for testing
-    import tempfile
-    temp_dir = tempfile.mkdtemp()
-    converter = EvernoteToNextcloudConverter(temp_dir, "test.zip", debug=debug)
-    
-    try:
-        result = converter.fetch_recipe_from_url(url)
-        if result:
-            print(f"SUCCESS: Fetched {len(result)} characters")
-            print(f"Preview: {result[:200]}...")
-            return True
-        else:
-            print("FAILED: No content returned")
-            return False
-    except Exception as e:
-        print(f"ERROR: {e}")
-        return False
-    finally:
-        import shutil
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
+    """Test URL fetching functionality"""
+    print(f"Testing URL fetch for: {url}")
+    converter = EvernoteToNextcloudConverter("dummy.enex", "test.zip", debug=debug)
+    result = converter.fetch_recipe_from_url(url)
+    if result:
+        print(f"Success! Retrieved {len(result)} characters")
+        print(f"Preview: {result[:200]}...")
+    else:
+        print("Failed to retrieve content")
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Convert Evernote .enex files to Nextcloud Recipes export format. '
-                   'Will attempt to fetch fresh content from source URLs when available.'
-    )
-    parser.add_argument('input_path', help='Directory containing .enex files or path to a single .enex file')
-    parser.add_argument('output_file', help='Output zip file path')
+    """Main CLI interface"""
+    parser = argparse.ArgumentParser(description='Convert Evernote .enex files to Nextcloud Recipes format')
+    parser.add_argument('input', help='Input .enex file or directory containing .enex files')
+    parser.add_argument('output', nargs='?', default='recipes_export.zip', help='Output zip file (default: recipes_export.zip)')
     parser.add_argument('--debug', action='store_true', help='Enable debug output')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
-    parser.add_argument('--no-web-fetch', action='store_true', 
-                       help='Disable fetching content from source URLs, use only .enex content')
+    parser.add_argument('--no-web-fetch', action='store_true', help='Disable web content fetching')
+    parser.add_argument('--test-url', type=str, help='Test URL fetching with the given URL')
     
     args = parser.parse_args()
     
-    if not os.path.exists(args.input_path):
-        print(f"Error: Path '{args.input_path}' not found")
-        return 1
+    if args.test_url:
+        test_url_fetch(args.test_url, args.debug)
+        return
     
-    exporter = EvernoteToNextcloudConverter(args.input_path, args.output_file, debug=args.debug)
+    if not Path(args.input).exists():
+        print(f"Error: Input file/directory '{args.input}' does not exist")
+        return
     
-    # Set web fetch option - enabled by default, disable only if requested
+    print(f"Converting Evernote recipes to Nextcloud format...")
+    print(f"Input: {args.input}")
+    print(f"Output: {args.output}")
+    
+    converter = EvernoteToNextcloudConverter(args.input, args.output, debug=args.debug)
     if args.no_web_fetch:
-        exporter.enable_web_fetch = False
+        converter.enable_web_fetch = False
+        print("Web content fetching disabled")
     
-    try:
-        exporter.convert()
-        print("\nConversion completed successfully!")
-        print("The export zip can be imported into Nextcloud Recipes or other systems that support Schema.org Recipe format.")
-    except Exception as e:
-        print(f"Conversion failed: {e}")
-        if args.verbose:
-            import traceback
-            traceback.print_exc()
-        return 1
-    
-    return 0
-
+    converter.convert()
 
 if __name__ == "__main__":
-    exit(main())
+    main()
