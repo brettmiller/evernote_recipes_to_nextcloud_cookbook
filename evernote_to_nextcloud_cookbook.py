@@ -32,7 +32,9 @@ import time
 
 
 class EvernoteToNextcloudConverter:
-    def __init__(self, input_path: str, output_file: str, debug: bool = False):
+    def __init__(self, input_path: str, output_file: str, debug: bool = False, 
+                 additional_tags: Optional[List[str]] = None, 
+                 override_tags: Optional[List[str]] = None):
         self.input_path = Path(input_path)
         self.output_file = Path(output_file)
         if not self.output_file.suffix:
@@ -43,6 +45,8 @@ class EvernoteToNextcloudConverter:
         self.recipe_counter = 0
         self.debug = debug
         self.enable_web_fetch = True  # Enabled by default, try curl-like approach first
+        self.additional_tags = additional_tags or []
+        self.override_tags = override_tags
 
     def convert(self):
         """Main conversion method"""
@@ -216,6 +220,42 @@ class EvernoteToNextcloudConverter:
                 final_ingredients, final_instructions, created, [], final_source_url
             )
             
+            # Apply tag logic for HTML-parsed recipes as well
+            if web_content and processing_method == "HTML parsing (web content)":
+                # Apply the same tag logic we use for JSON-LD recipes
+                base_keywords = ["imported", "evernote"]
+                existing_keywords = []
+                
+                # Parse existing keywords if they exist in the recipe data
+                if recipe_data.get('keywords'):
+                    if isinstance(recipe_data['keywords'], str):
+                        existing_keywords = [k.strip() for k in recipe_data['keywords'].split(',') if k.strip()]
+                    elif isinstance(recipe_data['keywords'], list):
+                        existing_keywords = [str(k).strip() for k in recipe_data['keywords'] if str(k).strip()]
+                
+                # Apply tag logic
+                if self.override_tags:
+                    # Override completely with new tags
+                    final_keywords = self.override_tags
+                else:
+                    # Start with base keywords, add existing, then additional
+                    final_keywords = base_keywords.copy()
+                    # Add existing keywords that aren't already in base
+                    for keyword in existing_keywords:
+                        if keyword not in final_keywords:
+                            final_keywords.append(keyword)
+                    # Add additional tags
+                    if self.additional_tags:
+                        for tag in self.additional_tags:
+                            if tag not in final_keywords:
+                                final_keywords.append(tag)
+                
+                # Update keywords in recipe data
+                recipe_data['keywords'] = ', '.join(final_keywords)
+                
+                if self.debug:
+                    print(f"    Applied tag logic to HTML-parsed recipe. Final keywords: {recipe_data['keywords']}")
+            
             # Create recipe directory with images
             return self.create_recipe_dir(self.recipe_counter, recipe_data, title, images, note, web_content, processing_method)
             
@@ -257,6 +297,19 @@ class EvernoteToNextcloudConverter:
                         "text": instruction.strip()
                     })
         
+        # Process keywords/tags
+        base_keywords = ["imported", "evernote"]
+        
+        # Apply tag logic
+        if self.override_tags:
+            # Override completely with new tags
+            final_keywords = self.override_tags
+        else:
+            # Start with base keywords and add additional tags
+            final_keywords = base_keywords.copy()
+            if self.additional_tags:
+                final_keywords.extend(self.additional_tags)
+        
         # Create Nextcloud Recipes format using Recipe schema.org structure
         recipe = {
             "@context": "https://schema.org",
@@ -270,7 +323,7 @@ class EvernoteToNextcloudConverter:
             "totalTime": "PT45M",
             "recipeCategory": "Imported",
             "recipeCuisine": "",
-            "keywords": "imported, evernote",
+            "keywords": ", ".join(final_keywords),
             "recipeIngredient": [ingredient.strip() for ingredient in ingredients if ingredient.strip()],
             "recipeInstructions": processed_instructions,
             "nutrition": {
@@ -2530,6 +2583,37 @@ class EvernoteToNextcloudConverter:
             recipe["@context"] = "https://schema.org"
             recipe["@type"] = "Recipe"
             
+            # Apply tag logic to JSON-LD recipes
+            base_keywords = ["imported", "evernote"]
+            existing_keywords = []
+            
+            # Parse existing keywords if they exist
+            if recipe.get('keywords'):
+                if isinstance(recipe['keywords'], str):
+                    existing_keywords = [k.strip() for k in recipe['keywords'].split(',') if k.strip()]
+                elif isinstance(recipe['keywords'], list):
+                    existing_keywords = [str(k).strip() for k in recipe['keywords'] if str(k).strip()]
+            
+            # Apply tag logic
+            if self.override_tags:
+                # Override completely with new tags
+                final_keywords = self.override_tags
+            else:
+                # Start with base keywords, add existing, then additional
+                final_keywords = base_keywords.copy()
+                # Add existing keywords that aren't already in base
+                for keyword in existing_keywords:
+                    if keyword not in final_keywords:
+                        final_keywords.append(keyword)
+                # Add additional tags
+                if self.additional_tags:
+                    for tag in self.additional_tags:
+                        if tag not in final_keywords:
+                            final_keywords.append(tag)
+            
+            # Update keywords in recipe
+            recipe['keywords'] = ', '.join(final_keywords)
+            
             # Only add metadata if it's missing (don't override good existing data)
             if not recipe.get("dateCreated") and created:
                 recipe["dateCreated"] = self.format_datetime(created)
@@ -2548,6 +2632,7 @@ class EvernoteToNextcloudConverter:
                 ingredients_count = len(recipe.get('recipeIngredient', []))
                 instructions_count = len(recipe.get('recipeInstructions', []))
                 print(f"    Using JSON-LD directly: {ingredients_count} ingredients, {instructions_count} instructions")
+                print(f"    Final keywords: {recipe['keywords']}")
             
             return recipe
             
@@ -2860,12 +2945,48 @@ def test_url_fetch(url: str, debug: bool = True):
 
 def main():
     """Main CLI interface"""
-    parser = argparse.ArgumentParser(description='Convert Evernote .enex files to Nextcloud Recipes format')
-    parser.add_argument('input', help='Input .enex file or directory containing .enex files')
-    parser.add_argument('output', nargs='?', default='recipes_export.zip', help='Output zip file (default: recipes_export.zip)')
-    parser.add_argument('--debug', action='store_true', help='Enable debug output')
-    parser.add_argument('--no-web-fetch', action='store_true', help='Disable web content fetching')
-    parser.add_argument('--test-url', type=str, help='Test URL fetching with the given URL')
+    parser = argparse.ArgumentParser(
+        description='Convert Evernote .enex files to Nextcloud Recipes format',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s recipes.enex                              # Convert single file
+  %(prog)s ~/Downloads/evernote_exports/             # Convert all .enex files in directory
+  %(prog)s recipes.enex --tags "vegetarian,quick"    # Add custom tags
+  %(prog)s recipes.enex -T "vegan,healthy"           # Override default tags completely
+  %(prog)s recipes.enex --debug                      # Enable debug output
+  %(prog)s --test-url "https://example.com/recipe"   # Test URL fetching
+
+Notes:
+  - Output format is compatible with Nextcloud Recipes and other Schema.org Recipe systems
+  - Web fetching prioritizes JSON-LD structured data for best accuracy
+  - Images are downloaded and included when available from web sources
+        """)
+    
+    # Positional arguments
+    parser.add_argument('input', 
+                       help='Input .enex file or directory containing .enex files')
+    parser.add_argument('output', nargs='?', default='recipes_export.zip', 
+                       help='Output zip file (default: recipes_export.zip)')
+    
+    # Tag options
+    tag_group = parser.add_argument_group('Tag Options')
+    tag_group.add_argument('-t', '--tags', type=str, metavar='TAG1,TAG2,...',
+                          help='Comma-separated list of additional tags to append to recipes')
+    tag_group.add_argument('-T', '--tag-override', type=str, metavar='TAG1,TAG2,...',
+                          help='Comma-separated list of tags to replace default tags completely')
+    
+    # Processing options
+    process_group = parser.add_argument_group('Processing Options')
+    process_group.add_argument('--debug', action='store_true', 
+                              help='Enable debug output for troubleshooting')
+    process_group.add_argument('--no-web-fetch', action='store_true', 
+                              help='Disable web content fetching (use only Evernote content)')
+    
+    # Testing options
+    test_group = parser.add_argument_group('Testing Options')
+    test_group.add_argument('--test-url', type=str, metavar='URL',
+                           help='Test URL fetching with the given URL (for debugging)')
     
     args = parser.parse_args()
     
@@ -2877,11 +2998,37 @@ def main():
         print(f"Error: Input file/directory '{args.input}' does not exist")
         return
     
+    # Parse tag arguments - preserve tags exactly as provided
+    additional_tags = []
+    override_tags = None
+    
+    if args.tags:
+        additional_tags = [tag.strip() for tag in args.tags.split(',') if tag.strip()]
+        if args.debug:
+            print(f"Additional tags: {additional_tags}")
+    
+    if args.tag_override:
+        override_tags = [tag.strip() for tag in args.tag_override.split(',') if tag.strip()]
+        if args.debug:
+            print(f"Override tags: {override_tags}")
+    
     print(f"Converting Evernote recipes to Nextcloud format...")
     print(f"Input: {args.input}")
     print(f"Output: {args.output}")
     
-    converter = EvernoteToNextcloudConverter(args.input, args.output, debug=args.debug)
+    if additional_tags:
+        print(f"Additional tags: {', '.join(additional_tags)}")
+    if override_tags:
+        print(f"Tag override: {', '.join(override_tags)}")
+    
+    converter = EvernoteToNextcloudConverter(
+        args.input, 
+        args.output, 
+        debug=args.debug,
+        additional_tags=additional_tags,
+        override_tags=override_tags
+    )
+    
     if args.no_web_fetch:
         converter.enable_web_fetch = False
         print("Web content fetching disabled")
