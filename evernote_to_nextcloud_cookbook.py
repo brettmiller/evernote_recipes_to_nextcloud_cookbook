@@ -2989,8 +2989,9 @@ def test_url_fetch(url: str, debug: bool = True):
 def main():
     """Main CLI interface"""
     parser = argparse.ArgumentParser(
-        description='Convert Evernote .enex files to Nextcloud Recipes format',
+        description='\nConvert Evernote .enex files to Nextcloud Recipes format\n',
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        usage='\n%(prog)s [-h|--help] [--tags TAG1,TAG2,...] [--tags-override TAG1,TAG2,...] [--categories CAT1,CAT2,...] [--categories-override CAT1,CAT2,...] [--debug] [--no-web-fetch] [--test-url URL] input [output]',
         epilog="""
 Examples:
   %(prog)s recipes.enex                                    Convert single file
