@@ -2578,7 +2578,16 @@ class EvernoteToNextcloudConverter:
             elif isinstance(image_data, dict) and 'url' in image_data:
                 image_urls = [image_data['url']]
             
-            # Filter and clean image URLs
+            # Also check for thumbnailUrl as a fallback - sometimes these are higher quality
+            thumbnail_urls = []
+            if 'thumbnailUrl' in recipe_data:
+                thumbnail_data = recipe_data['thumbnailUrl']
+                if isinstance(thumbnail_data, str):
+                    thumbnail_urls = [thumbnail_data]
+                elif isinstance(thumbnail_data, list):
+                    thumbnail_urls = thumbnail_data
+            
+            # Filter and clean image URLs, and try to get higher quality versions
             cleaned_urls = []
             for url in image_urls:
                 if url and isinstance(url, str):
@@ -2593,7 +2602,32 @@ class EvernoteToNextcloudConverter:
                     else:
                         continue  # Skip invalid URLs
                     
-                    cleaned_urls.append(url)
+                    # Try to get higher quality version of the image
+                    hq_url = self._get_higher_quality_image_url(url)
+                    cleaned_urls.append(hq_url)
+            
+            # If we don't have any good images, try thumbnail URLs as fallback
+            if not cleaned_urls and thumbnail_urls:
+                if self.debug:
+                    print(f"    No main images found, trying thumbnail URLs as fallback")
+                for url in thumbnail_urls:
+                    if url and isinstance(url, str):
+                        # Convert relative URLs to absolute
+                        if url.startswith('//'):
+                            url = 'https:' + url
+                        elif url.startswith('/') and recipe_data.get('url'):
+                            from urllib.parse import urljoin
+                            url = urljoin(recipe_data['url'], url)
+                        elif url.startswith('http'):
+                            pass  # Already absolute
+                        else:
+                            continue  # Skip invalid URLs
+                        
+                        # Try to get higher quality version of thumbnail
+                        hq_url = self._get_higher_quality_image_url(url)
+                        cleaned_urls.append(hq_url)
+                        if self.debug:
+                            print(f"    Added thumbnail URL: {hq_url}")
             
             if not cleaned_urls:
                 return recipe_data
@@ -2607,21 +2641,27 @@ class EvernoteToNextcloudConverter:
                     if self.debug:
                         print(f"    Downloading image {i+1}/{len(cleaned_urls)}: {img_url}")
                     
-                    # Download image with better headers
+                    # Download image with better headers that indicate we want high quality
                     headers = {
-                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Referer': recipe_data.get('url', ''),
+                        'Sec-Fetch-Dest': 'image',
+                        'Sec-Fetch-Mode': 'no-cors',
+                        'Sec-Fetch-Site': 'same-origin',
                     }
-                    response = requests.get(img_url, timeout=15, stream=True, headers=headers)
+                    response = requests.get(img_url, timeout=20, stream=True, headers=headers)
                     response.raise_for_status()
                     
-                    # Check content length to avoid downloading huge files
+                    # Check content length to avoid downloading huge files but allow larger images
                     content_length = response.headers.get('content-length')
-                    if content_length and int(content_length) > 10 * 1024 * 1024:  # 10MB limit
+                    if content_length and int(content_length) > 25 * 1024 * 1024:  # 25MB limit (increased from 10MB)
                         if self.debug:
                             print(f"    Skipping image - too large: {content_length} bytes")
                         continue
                     
-                    # Determine file extension
+                    # Determine file extension with better content type detection
                     content_type = response.headers.get('content-type', '').lower()
                     if 'jpeg' in content_type or 'jpg' in content_type:
                         ext = '.jpg'
@@ -2631,10 +2671,12 @@ class EvernoteToNextcloudConverter:
                         ext = '.webp'
                     elif 'gif' in content_type:
                         ext = '.gif'
+                    elif 'svg' in content_type:
+                        ext = '.svg'
                     else:
                         # Try to get from URL
                         ext = Path(img_url.split('?')[0]).suffix.lower()
-                        if ext not in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
+                        if ext not in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg']:
                             ext = '.jpg'  # Default
                     
                     # Save image with descriptive name - use "full" for first image to match Nextcloud convention
@@ -2684,6 +2726,70 @@ class EvernoteToNextcloudConverter:
             if self.debug:
                 print(f"    Error downloading JSON-LD images: {e}")
             return recipe_data
+
+    def _get_higher_quality_image_url(self, url: str) -> str:
+        """Try to get a higher quality version of the image URL"""
+        if not url:
+            return url
+        
+        original_url = url
+        
+        # Common patterns for getting higher quality images
+        
+        # WordPress sites often have size suffixes we can remove
+        # Pattern: image-300x200.jpg -> image.jpg
+        url = re.sub(r'-\d+x\d+(\.[a-zA-Z]+)$', r'\1', url)
+        
+        # Remove common thumbnail/small size indicators
+        size_indicators = [
+            '-thumb', '-thumbnail', '-small', '-medium', '-preview',
+            '-150x150', '-300x300', '-400x400', '-150', '-300', '-400',
+            '_thumb', '_thumbnail', '_small', '_medium', '_preview',
+            '_150x150', '_300x300', '_400x400', '_150', '_300', '_400'
+        ]
+        
+        for indicator in size_indicators:
+            url = re.sub(rf'{re.escape(indicator)}(\.[a-zA-Z]+)$', r'\1', url)
+        
+        # For many WordPress sites, try removing ?resize= parameters
+        if '?resize=' in url:
+            url = url.split('?resize=')[0]
+        
+        # Remove common WordPress image sizing parameters
+        wordpress_params = ['w=', 'h=', 'fit=', 'crop=', 'resize=', 'quality=']
+        if '?' in url:
+            base_url, params = url.split('?', 1)
+            param_pairs = params.split('&')
+            
+            # Keep only non-sizing parameters
+            keep_params = []
+            for param in param_pairs:
+                if '=' in param:
+                    param_name = param.split('=')[0].lower()
+                    if not any(wp_param.rstrip('=') in param_name for wp_param in wordpress_params):
+                        keep_params.append(param)
+            
+            if keep_params:
+                url = base_url + '?' + '&'.join(keep_params)
+            else:
+                url = base_url
+        
+        # Try to upgrade to larger standard sizes for some common CDNs
+        # Cloudinary
+        if 'cloudinary.com' in url:
+            # Try to replace small sizes with larger ones
+            url = re.sub(r'/w_\d+,h_\d+/', '/w_1200,h_800/', url)
+            url = re.sub(r'/c_scale,w_\d+/', '/c_scale,w_1200/', url)
+        
+        # Squarespace
+        if 'squarespace-cdn.com' in url or 'static1.squarespace.com' in url:
+            # Remove format parameters that might reduce quality
+            url = re.sub(r'\?format=\d+w', '?format=2500w', url)
+        
+        if self.debug and url != original_url:
+            print(f"    Enhanced image URL: {original_url} -> {url}")
+        
+        return url
 
     def create_recipe_from_json_ld(self, recipe_data: Dict, title: str, note: ET.Element) -> Optional[Path]:
         """Create recipe directory directly from JSON-LD data without text parsing"""
