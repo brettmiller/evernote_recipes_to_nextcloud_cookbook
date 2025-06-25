@@ -3419,7 +3419,8 @@ Notes:
         return
     
     if not args.input:
-        print("Error: Input file/directory is required when not using --test-url")
+        parser.print_usage()
+        print()  # Add empty line like --help does
         return
         
     if not Path(args.input).exists():
