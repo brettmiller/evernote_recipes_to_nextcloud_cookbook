@@ -180,8 +180,21 @@ class EvernoteToNextcloudConverter:
                     # Validate HTML parsing results before proceeding
                     if text_content:
                         # Test extract ingredients and instructions to see if we got useful content
+                        if self.debug:
+                            print(f"    Testing ingredient/instruction extraction on HTML content...")
+                            print(f"    HTML content preview: {text_content[:500]}...")
+                        
                         test_ingredients = self.extract_ingredients(text_content, title)
                         test_instructions = self.extract_instructions(text_content, title)
+                        
+                        if self.debug:
+                            print(f"    HTML parsing test results:")
+                            print(f"      - Ingredients found: {len(test_ingredients)}")
+                            print(f"      - Instructions found: {len(test_instructions)}")
+                            if test_ingredients:
+                                print(f"      - Sample ingredients: {test_ingredients[:3]}")
+                            if test_instructions:
+                                print(f"      - Sample instructions: {test_instructions[:2]}")
                         
                         # Enhanced validation: check if the web content is actually recipe-related
                         is_valid_recipe_content = self.validate_web_recipe_content(web_content, title, source_url)
@@ -694,6 +707,9 @@ class EvernoteToNextcloudConverter:
         if not url or not url.startswith(('http://', 'https://')):
             return None
         
+        # Store URL for diagnostic purposes
+        self._current_url = url
+        
         # Clean up URL - remove anchors and unnecessary parameters
         clean_url = self.clean_recipe_url(url)
         
@@ -731,7 +747,6 @@ class EvernoteToNextcloudConverter:
             # Don't return None here, still try the strategies
         
         # Try multiple strategies in order of preference
-        # Start with general strategies, then use enhanced methods as fallbacks for any difficult site
         strategies = [
             self._fetch_with_simple_headers,
             self._fetch_with_curl_headers,
@@ -774,6 +789,9 @@ class EvernoteToNextcloudConverter:
                 if self.debug:
                     status_code = getattr(e.response, 'status_code', 'unknown') if hasattr(e, 'response') else 'unknown'
                     print(f"    Strategy {i} HTTP error: {e} (status: {status_code})")
+                    if hasattr(e, 'response') and e.response is not None:
+                        print(f"    Response URL: {e.response.url}")
+                        print(f"    Response headers: {dict(list(e.response.headers.items())[:5])}")
                 # For 403/429 errors on major sites, add delay
                 if hasattr(e, 'response') and e.response.status_code in [403, 429]:
                     if any(site in clean_url.lower() for site in ['seriouseats.com', 'nytimes.com']):
@@ -783,7 +801,7 @@ class EvernoteToNextcloudConverter:
                 continue
             except Exception as e:
                 if self.debug:
-                    print(f"    Strategy {i} failed with exception: {e}")
+                    print(f"    Strategy {i} failed with exception: {type(e).__name__}: {e}")
                 continue
         
         if self.debug:
@@ -840,7 +858,7 @@ class EvernoteToNextcloudConverter:
         }
         
         try:
-            response = requests.get(url, headers=headers, timeout=15)
+            response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
             response.raise_for_status()
             return self._process_response(response)
         except Exception as e:
@@ -856,7 +874,7 @@ class EvernoteToNextcloudConverter:
         }
         
         try:
-            response = requests.get(url, headers=headers, timeout=15)
+            response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
             response.raise_for_status()
             return self._process_response(response)
         except Exception as e:
@@ -867,7 +885,7 @@ class EvernoteToNextcloudConverter:
     def _fetch_with_basic_requests(self, url: str) -> Optional[str]:
         """Fetch with basic requests (no custom headers)"""
         try:
-            response = requests.get(url, timeout=15)
+            response = requests.get(url, timeout=15, allow_redirects=True)
             response.raise_for_status()
             return self._process_response(response)
         except Exception as e:
@@ -888,7 +906,7 @@ class EvernoteToNextcloudConverter:
         }
         
         try:
-            response = requests.get(url, headers=headers, timeout=20)
+            response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
             response.raise_for_status()
             return self._process_response(response)
         except Exception as e:
@@ -903,7 +921,7 @@ class EvernoteToNextcloudConverter:
         }
         
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
             response.raise_for_status()
             return self._process_response(response)
         except Exception as e:
@@ -928,7 +946,7 @@ class EvernoteToNextcloudConverter:
         }
         
         try:
-            response = requests.get(url, headers=headers, timeout=25)
+            response = requests.get(url, headers=headers, timeout=25, allow_redirects=True)
             response.raise_for_status()
             return self._process_response(response)
         except Exception as e:
@@ -949,7 +967,7 @@ class EvernoteToNextcloudConverter:
         }
         
         try:
-            response = requests.get(url, headers=headers, timeout=25)
+            response = requests.get(url, headers=headers, timeout=25, allow_redirects=True)
             response.raise_for_status()
             return self._process_response(response)
         except Exception as e:
@@ -967,7 +985,7 @@ class EvernoteToNextcloudConverter:
                 # Add minimal delay to be respectful
                 time.sleep(0.5)
                 
-                response = session.get(url, timeout=20, verify=True)  # Try SSL verification first
+                response = session.get(url, timeout=20, verify=True, allow_redirects=True)  # Ensure redirects are followed
                 
                 if self.debug:
                     print(f"      Got response: {response.status_code}")
@@ -989,7 +1007,7 @@ class EvernoteToNextcloudConverter:
             try:
                 with requests.Session() as session:
                     time.sleep(0.5)
-                    response = session.get(url, timeout=20, verify=False)
+                    response = session.get(url, timeout=20, verify=False, allow_redirects=True)
                     if self.debug:
                         print(f"      Got response (no SSL): {response.status_code}")
                     
@@ -1281,23 +1299,87 @@ class EvernoteToNextcloudConverter:
             
             if self.debug:
                 print(f"    No valid JSON-LD found, trying HTML parsing...")
+                # Diagnostic: Show what class names exist in the HTML
+                class_matches = re.findall(r'class=["\']([^"\']*)["\']', html_content, re.IGNORECASE)
+                unique_classes = set()
+                for class_attr in class_matches[:50]:  # Limit to first 50
+                    for cls in class_attr.split():
+                        if 'recipe' in cls.lower() or 'content' in cls.lower() or 'main' in cls.lower():
+                            unique_classes.add(cls)
+                if unique_classes:
+                    print(f"    Found relevant CSS classes: {sorted(list(unique_classes))[:10]}")
+                
+                # Diagnostic: Show what id names exist
+                id_matches = re.findall(r'id=["\']([^"\']*)["\']', html_content, re.IGNORECASE)
+                relevant_ids = [id_name for id_name in id_matches if any(keyword in id_name.lower() for keyword in ['recipe', 'content', 'main', 'article'])]
+                if relevant_ids:
+                    print(f"    Found relevant IDs: {relevant_ids[:10]}")
             
-            # Look for microdata or specific recipe containers
-            recipe_selectors = [
+            # Enhanced SeriousEats-specific patterns prioritizing structured data first
+            seriouseats_selectors = [
+                # PRIORITY 1: Look for structured data with microdata - this is most likely where the recipe is
+                r'<div[^>]*itemtype=["\'][^"\']*Recipe[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<section[^>]*itemtype=["\'][^"\']*Recipe[^"\']*["\'][^>]*>(.*?)</section>',
+                r'<article[^>]*itemtype=["\'][^"\']*Recipe[^"\']*["\'][^>]*>(.*?)</article>',
+                r'<div[^>]*itemscope[^>]*itemtype=["\'][^"\']*Recipe[^"\']*["\'][^>]*>(.*?)</div>',
+                
+                # PRIORITY 2: SeriousEats specific class patterns - look for recipe content areas
+                r'<div[^>]*class=["\'][^"\']*recipe-summary[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<div[^>]*class=["\'][^"\']*recipe-procedure[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<div[^>]*class=["\'][^"\']*recipe-ingredients[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<section[^>]*class=["\'][^"\']*recipe[^"\']*["\'][^>]*>(.*?)</section>',
+                r'<article[^>]*class=["\'][^"\']*recipe[^"\']*["\'][^>]*>(.*?)</article>',
+                
+                # PRIORITY 3: More specific content containers
+                r'<div[^>]*class=["\'][^"\']*entry-content[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<div[^>]*class=["\'][^"\']*post-content[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<div[^>]*class=["\'][^"\']*recipe-content[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<main[^>]*id=["\'][^"\']*content[^"\']*["\'][^>]*>(.*?)</main>',
+                
+                # PRIORITY 4: Generic recipe patterns
                 r'<div[^>]*class=["\'][^"\']*recipe[^"\']*["\'][^>]*>(.*?)</div>',
                 r'<article[^>]*class=["\'][^"\']*recipe[^"\']*["\'][^>]*>(.*?)</article>',
                 r'<section[^>]*class=["\'][^"\']*recipe[^"\']*["\'][^>]*>(.*?)</section>',
-                r'<div[^>]*itemtype=["\'][^"\']*Recipe[^"\']*["\'][^>]*>(.*?)</div>',
+                
+                # PRIORITY 5: Broader content areas (these might pick up navigation, so try them last)
+                r'<main[^>]*>(.*?)</main>',
+                r'<article[^>]*>(.*?)</article>',
+                r'<div[^>]*id=["\'][^"\']*content[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<div[^>]*id=["\'][^"\']*main[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<div[^>]*class=["\'][^"\']*content[^"\']*["\'][^>]*>(.*?)</div>',
             ]
             
-            for selector in recipe_selectors:
+            for i, selector in enumerate(seriouseats_selectors):
                 matches = re.findall(selector, html_content, re.DOTALL | re.IGNORECASE)
                 if matches:
+                    if self.debug:
+                        print(f"    Found HTML content with selector {i+1}: {len(matches)} matches")
+                        # Show preview of first few matches
+                        for j, match in enumerate(matches[:3]):
+                            preview = self.html_to_text(match)[:100].replace('\n', ' ')
+                            print(f"      Match {j+1}: {preview}...")
+                    
                     # Take the longest match (most likely to be the main recipe)
                     recipe_html = max(matches, key=len)
-                    return self.html_to_text(recipe_html)
+                    extracted_text = self.html_to_text(recipe_html)
+                    
+                    # More lenient validation for recipe sites
+                    if len(extracted_text.strip()) > 50:
+                        if self.debug:
+                            print(f"    HTML selector {i+1} produced {len(extracted_text)} chars")
+                        return extracted_text
+                    elif self.debug:
+                        print(f"    HTML selector {i+1} content too short: {len(extracted_text)} chars")
+                elif self.debug:
+                    print(f"    Selector {i+1} found no matches")
             
-            # Fallback: look for common recipe text patterns
+            # Fallback: look for common recipe text patterns in full HTML
+            if self.debug:
+                print(f"    No recipe containers found, trying full HTML text extraction...")
+                # Show some sample content to understand the structure
+                sample_text = self.html_to_text(html_content)
+                print(f"    Full HTML sample (first 500 chars): {sample_text[:500]}...")
+            
             return self.extract_recipe_text_patterns(html_content)
             
         except Exception as e:
@@ -1507,6 +1589,10 @@ class EvernoteToNextcloudConverter:
         # Convert to text first
         text_content = self.html_to_text(html_content)
         
+        if self.debug:
+            print(f"    Full HTML-to-text conversion: {len(text_content)} characters")
+            print(f"    Text preview: {text_content[:300]}...")
+        
         # Look for recipe keywords
         recipe_keywords = [
             r'ingredients?:?\s*\n',
@@ -1519,6 +1605,8 @@ class EvernoteToNextcloudConverter:
         # Find recipe sections
         for keyword in recipe_keywords:
             if re.search(keyword, text_content, re.IGNORECASE):
+                if self.debug:
+                    print(f"    Found recipe keyword: {keyword}")
                 # Found recipe content
                 return text_content
         
@@ -1531,12 +1619,28 @@ class EvernoteToNextcloudConverter:
         
         measurement_count = 0
         for pattern in measurement_patterns:
-            measurement_count += len(re.findall(pattern, text_content, re.IGNORECASE))
+            matches = re.findall(pattern, text_content, re.IGNORECASE)
+            measurement_count += len(matches)
+            if self.debug and matches:
+                print(f"    Found {len(matches)} matches for pattern: {pattern}")
+        
+        if self.debug:
+            print(f"    Total measurement patterns found: {measurement_count}")
         
         # If we found several measurements, it's likely a recipe
         if measurement_count >= 3:
+            if self.debug:
+                print(f"    Accepting content based on measurement count")
             return text_content
         
+        # For SeriousEats specifically, be more lenient - if we have substantial content, use it
+        if len(text_content.strip()) > 500:
+            if self.debug:
+                print(f"    Using full content as fallback (substantial length: {len(text_content)} chars)")
+            return text_content
+        
+        if self.debug:
+            print(f"    No recipe content patterns found")
         return None
 
     def validate_web_recipe_content(self, web_content: str, recipe_title: str, source_url: str) -> bool:
@@ -2356,6 +2460,12 @@ class EvernoteToNextcloudConverter:
             # Unicode fractions
             r'^\s*[¼½¾⅓⅔⅛⅜⅝⅞]\s*(cups?|tablespoons?|tbsp|teaspoons?|tsp|pounds?|lbs?|ounces?|oz)',
             
+            # NEW: Simple ingredient names without measurements (catch ingredients that don't have measurements)
+            r'^\s*[a-zA-Z][a-zA-Z\s,\-\(\)]*(?:tofu|oil|sauce|miso|chipotle|garlic|ginger|scallions?|pepper|salt|sesame|vinegar|sugar|honey|lime|lemon|soy|firm|extra|virgin|olive|vegetable|canola|peanut|rice|wine|white|red|black|ground|fresh|dried|minced|chopped|sliced)[a-zA-Z\s,\-\(\)]*$',
+            
+            # Even more lenient: any line that contains common ingredient words but no measurements
+            r'.*(?:tofu|miso|chipotle|garlic|ginger|scallions?|green onions?|soy sauce|sesame oil|rice vinegar|sugar|honey|lime|lemon|oil|sauce|pepper|salt).*',
+            
             # Simple number + any word (catch-all for items like "2 eggs", "3 apples")
             r'^\s*\d+\s+[a-zA-Z]+',  # "2 teaspoons", "12 ounces", etc.
         ]
@@ -2723,29 +2833,21 @@ class EvernoteToNextcloudConverter:
 
     def extract_structured_recipe_data(self, html_content: str) -> Optional[dict]:
         """Extract JSON-LD Recipe data from HTML and return as dict, or None if not found."""
-        # Try multiple JSON-LD patterns with different approaches
+        # Try standard JSON-LD patterns
         json_ld_patterns = [
-            # Standard patterns
             r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
             r'<script[^>]*type=["\']application/ld\+json["\']>(.*?)</script>',
-            # More lenient patterns for sites with unusual formatting
-            r'<script[^>]*type\s*=\s*["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-            r'<script[^>]*type\s*=\s*["\']application/ld\+json["\']>(.*?)</script>',
-            # Even more permissive for edge cases
-            r'<script[^>]*type=[^>]*ld\+json[^>]*>(.*?)</script>',
         ]
         
-        for pattern in json_ld_patterns:
+        for i, pattern in enumerate(json_ld_patterns):
             matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
             for match in matches:
-                clean_json = ""
+                clean_json = match.strip()  # Initialize here to avoid unbound variable issues
                 try:
                     if self.debug:
-                        print(f"    Trying to parse JSON-LD block: {match[:100]}...")
+                        print(f"    Found JSON-LD block: {match[:200]}...")
                     
-                    # Clean up the JSON more aggressively for difficult sites
-                    clean_json = match.strip()
-                    
+                    # Clean up the JSON
                     # Remove HTML comments
                     clean_json = re.sub(r'<!--.*?-->', '', clean_json, flags=re.DOTALL)
                     
@@ -2753,11 +2855,17 @@ class EvernoteToNextcloudConverter:
                     clean_json = re.sub(r'//.*?\n', '', clean_json)
                     clean_json = re.sub(r'/\*.*?\*/', '', clean_json, flags=re.DOTALL)
                     
-                    # Remove any leading/trailing whitespace and newlines
+                    # Fix common JSON formatting issues
+                    clean_json = re.sub(r'\n\s*,', ',', clean_json)
+                    clean_json = re.sub(r',(\s*[}\]])', r'\1', clean_json)
+                    clean_json = re.sub(r'([}\]"])\s*\n\s*"', r'\1,\n"', clean_json)
+                    
                     clean_json = clean_json.strip()
                     
-                    # Try to handle cases where there might be multiple JSON objects
-                    # by trying to parse each potential JSON block
+                    if self.debug:
+                        print(f"    Cleaned JSON preview: {clean_json[:300]}...")
+                    
+                    # Try to parse the JSON
                     if clean_json.startswith('[') or clean_json.startswith('{'):
                         json_data = json.loads(clean_json)
                         
@@ -2774,31 +2882,19 @@ class EvernoteToNextcloudConverter:
                 except json.JSONDecodeError as e:
                     if self.debug:
                         print(f"    JSON parsing failed: {e}")
-                    # Try to fix common JSON issues if we have valid JSON content
-                    if clean_json:
-                        try:
-                            # Sometimes there are trailing commas or other issues
-                            fixed_json = self._attempt_json_fix(clean_json)
-                            if fixed_json:
-                                json_data = json.loads(fixed_json)
-                                items = json_data if isinstance(json_data, list) else [json_data]
-                                for item in items:
-                                    recipe = self._extract_recipe_from_json_item(item)
-                                    if recipe:
-                                        if self.debug:
-                                            print(f"    Successfully found Recipe in fixed JSON-LD!")
-                                        return recipe
-                        except Exception as e2:
-                            if self.debug:
-                                print(f"    JSON fix attempt also failed: {e2}")
-                            continue
+                        # Show the problematic line for debugging
+                        if 'clean_json' in locals():
+                            lines = clean_json.split('\n')
+                            error_line = min(e.lineno, len(lines)) if hasattr(e, 'lineno') and e.lineno else 1
+                            print(f"    Error around line {error_line}: {lines[error_line-1] if error_line <= len(lines) else 'N/A'}")
+                    continue
                 except Exception as e:
                     if self.debug:
                         print(f"    General error parsing JSON-LD: {e}")
                     continue
         
         if self.debug:
-            print(f"    No valid JSON-LD Recipe found after trying all patterns")
+            print(f"    No valid JSON-LD Recipe found")
         return None
 
     def _extract_recipe_from_json_item(self, item: dict) -> Optional[dict]:
@@ -2826,21 +2922,6 @@ class EvernoteToNextcloudConverter:
                             return graph_item
         
         return None
-
-    def _attempt_json_fix(self, json_str: str) -> Optional[str]:
-        """Attempt to fix common JSON formatting issues"""
-        try:
-            # Remove trailing commas before closing brackets/braces
-            fixed = re.sub(r',(\s*[}\]])', r'\1', json_str)
-            
-            # Try to handle unescaped quotes in strings (basic attempt)
-            # This is a simple fix and might not work for all cases
-            
-            # Validate the fix by attempting to parse
-            json.loads(fixed)
-            return fixed
-        except:
-            return None
 
     def validate_and_use_json_ld_recipe(self, json_ld_recipe: dict, recipe_title: str, created: Optional[str] = None, source_url: str = "") -> Optional[Dict]:
         """Validate JSON-LD Recipe data and use directly if valid, with minimal cleanup"""
@@ -3225,6 +3306,23 @@ def test_url_fetch(url: str, debug: bool = True):
     """Test URL fetching functionality"""
     print(f"Testing URL fetch for: {url}")
     converter = EvernoteToNextcloudConverter("dummy.enex", "test.zip", debug=debug)
+    
+    # First, let's test with a direct requests call to see what we get
+    print("\n--- Testing with direct requests call ---")
+    try:
+        import requests
+        direct_response = requests.get(url, timeout=10, allow_redirects=True)
+        print(f"Direct requests - Status: {direct_response.status_code}")
+        print(f"Direct requests - Final URL: {direct_response.url}")
+        print(f"Direct requests - Content length: {len(direct_response.text)}")
+        print(f"Direct requests - Headers: {dict(list(direct_response.headers.items())[:5])}")
+        if direct_response.status_code == 200:
+            print(f"Direct requests - Content preview: {direct_response.text[:200]}...")
+    except Exception as e:
+        print(f"Direct requests failed: {e}")
+    
+    # Now test with our fetch method
+        print("\n--- Testing with converter fetch method ---")
     result = converter.fetch_recipe_from_url(url)
     if result:
         print(f"Success! Retrieved {len(result)} characters")
@@ -3276,7 +3374,7 @@ Notes:
         """)
     
     # Positional arguments
-    parser.add_argument('input', 
+    parser.add_argument('input', nargs='?',
                         help='Input .enex file or directory containing .enex files')
     parser.add_argument('output', nargs='?', default='recipes_export.zip', 
                         help='Output zip file (default: recipes_export.zip)')
@@ -3320,6 +3418,10 @@ Notes:
         test_url_fetch(args.test_url, args.debug)
         return
     
+    if not args.input:
+        print("Error: Input file/directory is required when not using --test-url")
+        return
+        
     if not Path(args.input).exists():
         print(f"Error: Input file/directory '{args.input}' does not exist")
         return
